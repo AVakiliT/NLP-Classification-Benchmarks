@@ -3,45 +3,61 @@ import torch
 from torch import nn
 from torch.nn import functional as F, Parameter
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from torchtext.data import Field, TabularDataset, BucketIterator
+from torchtext.data import Field, TabularDataset, BucketIterator, Example, NestedField, Dataset
 from torchtext.vocab import GloVe
 from tqdm import tqdm
+import pandas as pd
 
 # %%
 
-BATCH_SIZE = 128
+BATCH_SIZE = 256
 LR = 1e-3
-N_EPOCHS = 20
+N_EPOCHS = 100
 MIN_FREQ = 8
 EMB_DIM = 100
 HIDDEN_DIM = 100
-MAX_LEN = 800
-EPSILON = 1e-13
+MAX_LEN = 35
 # folder = '/home/amir/IIS/Datasets/new_V2/Ubuntu_corpus_V2/'
 # device = torch.device('cpu')
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN, tokenize=lambda x: x.split(), include_lengths=True,
+TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN, tokenize=lambda x: x.split(),
+             # include_lengths=True,
              batch_first=True, pad_first=True, truncate_first=True)
+
+NESTED_TEXT = NestedField(TEXT,
+                          fix_length=MAX_LEN,
+                          truncate_first=True,
+                          pad_first=True)
 
 LABEL = Field(sequential=False, use_vocab=False, batch_first=True)
 
 columns = [('text', TEXT),
-           ('label', LABEL)]
+           ('label', LABEL),
+           ('text_split', NESTED_TEXT)
+           ]
 
-train = TabularDataset(
-    path='train_clean.csv',
-    format='csv',
-    fields=columns,
-    skip_header=True
-)
 
-test = TabularDataset(
-    path='test_clean.csv',
-    format='csv',
-    fields=columns,
-    skip_header=True
-)
+train_df = pd.read_csv('train_clean_split.csv', converters={'text_split': lambda x: x.split('\t')})
+train = Dataset([Example.fromlist(row, columns) for _, row in train_df.iterrows()], columns)
+
+test_df = pd.read_csv('test_clean_split.csv', converters={'text_split': lambda x: x.split('\t')})
+test = Dataset([Example.fromlist(row, columns) for _, row in test_df.iterrows()], columns)
+
+
+# train = TabularDataset(
+#     path='train_clean.csv',
+#     format='csv',
+#     fields=columns,
+#     skip_header=True
+# )
+#
+# test = TabularDataset(
+#     path='test_clean.csv',
+#     format='csv',
+#     fields=columns,
+#     skip_header=True
+# )
 
 TEXT.build_vocab(train, min_freq=MIN_FREQ,
                  # vectors=GloVe(name='6B', dim=200, cache='/home/amir/IIS/Datasets/embeddings')
@@ -80,7 +96,7 @@ class TrainIterWrap:
 
     def __iter__(self):
         for batch in self.iterator:
-            yield batch.text, batch.label
+            yield batch.text, batch.text_split, batch.label
 
     def __len__(self):
         return len(self.iterator)
@@ -114,134 +130,6 @@ class TextCNN(nn.Module):
         xs = [l(x).squeeze() for l in self.cnn]
         x = torch.cat(xs, 1)
         return self.final(x).squeeze()
-
-
-class TextCnnWithFusion(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        N_FILTERS = 50
-        SIZES = [1, 2, 3, 5]
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
-        self.cnn = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(1, N_FILTERS, (i, EMB_DIM)),
-                nn.ReLU(),
-                nn.MaxPool2d((MAX_LEN - i + 1, 1))
-            )
-            for i in SIZES
-        ])
-        self.final = nn.Linear(N_FILTERS * len(SIZES), 50)
-
-        self.cnn2 = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(1, N_FILTERS, (i, EMB_DIM)),
-                nn.ReLU(),
-                nn.MaxPool2d((MAX_LEN - i + 1, 1))
-            )
-            for i in SIZES
-        ])
-        self.final2 = nn.Linear(N_FILTERS * len(SIZES), 50)
-
-    def self_att(self, x, mask):
-        s = (x @ x.transpose(1, 2))
-        # zero att score for word on itself before softmax
-        s = s * (1 - torch.eye(MAX_LEN, device=device))
-        s = F.softmax(s, -1)
-        # zero att score for word on itself again
-        s = s * (1 - torch.eye(MAX_LEN, device=device))
-        # mask zeros attention scores for pad tokens
-        mask_2d = mask.unsqueeze(-1).float()
-        mask_2d = (mask_2d @ mask_2d.transpose(1, 2))
-        s = s * mask_2d
-        # make sure each row sum is 1 and avoid divide by zero
-        s = s / (s.sum(dim=-1, keepdim=True) + EPSILON)
-        x_hat = s @ x
-        return x_hat
-
-    def forward(self, x, x_len, mask):
-        x = self.emb(x)
-        x_hat = self.self_att(x, mask)
-        x_hat = x + x_hat
-        x = x.unsqueeze(1)
-        x_hat = x_hat.unsqueeze(1)
-        xs = [l(x).squeeze() for l in self.cnn]
-        x_hats = [l(x_hat).squeeze() for l in self.cnn2]
-        x = torch.cat(xs, 1)
-        x_hat = torch.cat(x_hats, 1)
-        x = self.final(x).squeeze()
-        x_hat = self.final2(x_hat).squeeze()
-        return x + x_hat
-
-
-def get_final(a, b, c):
-    return nn.Sequential(
-        nn.Linear(a, b),
-        nn.ReLU(),
-        nn.Linear(b, c),
-    )
-
-
-class TextCnnWithFusionAndContext(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        N_FILTERS = 50
-        SIZES = [1, 3, 5]
-        HIDDEN_DIM = N_FILTERS * len(SIZES)
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
-        self.cnn = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(1, N_FILTERS, (i, EMB_DIM), padding=(i//2, 0)),
-                nn.ReLU(),
-                # nn.MaxPool2d((MAX_LEN - i + 1, 1))
-            )
-            for i in SIZES
-        ])
-
-        self.rnn = nn.LSTM(EMB_DIM, HIDDEN_DIM // 2, bidirectional=True)
-
-        self.finals = nn.ModuleList([
-            get_final(EMB_DIM, 100, 50),
-            get_final(EMB_DIM, 100, 50),
-            get_final(HIDDEN_DIM, 100, 50),
-            get_final(HIDDEN_DIM, 100, 50),
-        ])
-
-    def self_att(self, x, mask):
-        s = (x @ x.transpose(1, 2))
-        # zero att score for word on itself before softmax
-        s = s * (1 - torch.eye(MAX_LEN, device=device))
-        s = F.softmax(s, -1)
-        # zero att score for word on itself again
-        s = s * (1 - torch.eye(MAX_LEN, device=device))
-        # mask zeros attention scores for pad tokens
-        mask_2d = mask.unsqueeze(-1).float()
-        mask_2d = (mask_2d @ mask_2d.transpose(1, 2))
-        s = s * mask_2d
-        # make sure each row sum is 1 and avoid divide by zero
-        s = s / (s.sum(dim=-1, keepdim=True) + EPSILON)
-        x_hat = s @ x
-        return x_hat
-
-    def forward(self, x, x_len, mask):
-        x_emb = self.emb(x)
-        x_hat = self.self_att(x_emb, mask)
-        x_cnn = x_emb.unsqueeze(1)
-
-        x_cnns = [l(x_cnn).squeeze() for l in self.cnn]
-
-        x_cnn = torch.cat(x_cnns, -2).transpose(1,2)
-
-        x_rnn = self.rnn(x_emb)[0]
-
-        representations = [x_emb, x_hat, x_cnn, x_rnn]
-
-        representations = [i.max(-2)[0] for i in representations]
-
-        representations = [l(i) for l, i in zip(self.finals, representations)]
-
-        return sum(representations)
 
 
 class CNN(nn.Module):
@@ -288,19 +176,25 @@ class LSTMClassifier(nn.Module):
     def __init__(self):
         super().__init__()
         self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
-        self.RNN = nn.GRU(EMB_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True, num_layers=2)
-        self.final = nn.Linear(HIDDEN_DIM * 2, 50, bias=False)
+        self.RNN = nn.GRU(EMB_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True)
+        self.RNN2 = nn.GRU(HIDDEN_DIM * 2, HIDDEN_DIM * 2, batch_first=True, bidirectional=True)
+        self.final = nn.Linear(HIDDEN_DIM * 4, 50, bias=False)
 
-    def forward(self, x, x_len, mask):
-        x = self.emb(x)
+    def sentence(self, s):
+        s = self.emb(s)
+        s = self.RNN(s)[0]
+        s = s.mean(-2)
+        return s
 
-        # x = pack_padded_sequence(x, x_len, batch_first=True)
-        x = self.RNN(x)[0]
-        # x = pad_packed_sequence(x, batch_first=True)[0]
+    def forward(self, _, _x_split, _mask):
 
-        x = x[:, -1, :]
-        x = self.final(x).squeeze()
-        return x
+        _x_split = _x_split.transpose(0, 1)
+        xs = torch.stack([self.sentence(s) for s in _x_split]).transpose(0, 1)
+        xs = self.RNN2(xs)[0]
+
+        xs = xs.mean(-2)
+        xs = self.final(xs)
+        return xs
 
 
 class AttentionClassifier(nn.Module):
@@ -317,7 +211,7 @@ class AttentionClassifier(nn.Module):
         mask_2d = (mask_2d @ mask_2d.transpose(1, 2))
         s = s * mask_2d
         # make sure each row sum is 1 and avoid divide by zero
-        s = s / (s.sum(dim=-1, keepdim=True) + EPSILON)
+        s = s / (s.sum(dim=-1, keepdim=True) + 1e-13)
         x_hat = s @ x
         return x_hat
 
@@ -374,15 +268,13 @@ class AttentionClassifier(nn.Module):
 
 
 models = [
-    # LSTMClassifier().to(device),
+    LSTMClassifier().to(device),
     # AttentionClassifier(False, False).to(device),
     # AttentionClassifier(False, True).to(device),
     # AttentionClassifier(True, False).to(device),
     # AttentionClassifier(True, True).to(device),
     # CNN().to(device),
-    TextCnnWithFusionAndContext().to(device),
-    TextCNN().to(device),
-    TextCnnWithFusion().to(device),
+    # TextCNN().to(device),
 ]
 criterion = nn.CrossEntropyLoss()
 
@@ -397,10 +289,10 @@ for model in models:
         accu_total = 0
         total = 0
         # progress_bar = tqdm(train_data_loader)
-        for x, y in train_data_loader:
+        for x, x_split, y in train_data_loader:
             optimizer.zero_grad()
-            mask = x[0] != PAD
-            prediction = model(x[0], x[1], mask)
+            mask = x != PAD
+            prediction = model(x, x_split, mask)
             loss = criterion(prediction, y.long())
             loss.backward()
             optimizer.step()
@@ -417,9 +309,9 @@ for model in models:
         loss_total_test = 0
         accu_total_test = 0
         total_test = 0
-        for x, y in test_data_loader:
-            mask = x[0] != PAD
-            prediction = model(x[0], x[1], mask)
+        for x, x_split, y in test_data_loader:
+            mask = x != PAD
+            prediction = model(x, x_split, mask)
             loss = criterion(prediction, y.long())
 
             with torch.no_grad():
@@ -470,5 +362,5 @@ plt.legend(legends, loc='upper left',
            bbox_to_anchor=(0, -0.2),
            fancybox=True, shadow=True, ncol=2)
 plt.title("Comparison of ANN Models")
-plt.show()
-# plt.savefig('acc3.png', dpi=300, bbox_inches='tight')
+# plt.show()
+plt.savefig('acc3.png', dpi=300, bbox_inches='tight')
