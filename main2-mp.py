@@ -8,7 +8,7 @@ import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
 from nltk import word_tokenize
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix, f1_score
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from tqdm import tqdm
@@ -89,7 +89,14 @@ abs_valid_preds = predict(abs_lms, df_valid, is_bigram=True, is_char=False, is_m
 
 def metrics(preds, y):
     acc = np.array([preds == y[:len(preds)]]).mean()
-    return acc
+    f1 = f1_score(preds, y, average='macro', labels=np.unique(preds))
+    return acc, f1
+
+
+def write_gen(lm, f, is_char):
+    space = '' if is_char else ' '
+    txt = space.join(lm.generate(10 if not is_char else 50))
+    print(txt, file=f)
 
 
 def write_result(name, preds, f):
@@ -104,6 +111,12 @@ with open('results.txt', 'w') as f:
     for name, preds in zip(['bi', 'uni', 'char', 'abs'],
                            [bigram_valid_preds, unigram_valid_preds, char_valid_preds, abs_valid_preds]):
         write_result(name, preds, f)
+
+with open('generated.txt', 'w') as f:
+    for name, lm in zip(['bi', 'uni', 'char', 'abs'],
+                        map(lambda x: x[-50], [bigram_lms, unigram_lms, char_lms, abs_lms])):
+        print(name, file=f)
+        write_gen(lm, f, is_char=name == 'char')
 
 # %%
 POOL.close()

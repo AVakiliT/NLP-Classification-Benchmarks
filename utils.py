@@ -8,7 +8,7 @@ from nltk.lm.smoothing import KneserNey
 
 # TODO fix start and end tokens
 def train_lm(create, df_train, is_bigram, is_char, i):
-    print(i)
+    print(i, '/ 50')
     lm = create()
     df_sub = df_train[df_train.label == i]
     text = df_sub.text_char if is_char else df_sub.text
@@ -34,7 +34,7 @@ def instantiate_abs():
 
 def predict_text(lms, num_classes, is_bigram, is_char, text):
     text, text_char, index = text
-    print(index)
+    print(index, '/ 100')
     _ngrams = list(ngrams(pad_both_ends(text_char if is_char else text, 2 if is_bigram else 1), 2 if is_bigram else 1))
     p = [lms[i].entropy(_ngrams) for i in range(num_classes)]
     pred = np.argmin(p)

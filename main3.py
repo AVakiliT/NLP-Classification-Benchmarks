@@ -9,11 +9,11 @@ from tqdm import tqdm
 
 # %%
 
-BATCH_SIZE = 128
+BATCH_SIZE = 64
 LR = 1e-3
 N_EPOCHS = 20
 MIN_FREQ = 8
-EMB_DIM = 100
+EMBEDDING_DIM = 100
 HIDDEN_DIM = 100
 MAX_LEN = 800
 EPSILON = 1e-13
@@ -89,7 +89,19 @@ class TrainIterWrap:
 train_data_loader = TrainIterWrap(train_iter)
 test_data_loader = TrainIterWrap(test_iter)
 
-
+#%%
+# w2v = gensim.models.Word2Vec.load('msdialog_' + str(EMBEDDING_DIM) + '.w2v')
+#
+# embedding_weights = torch.zeros(len(TEXT.vocab), EMBEDDING_DIM)
+# init.normal_(embedding_weights)
+#
+# for i, word in enumerate(TEXT.vocab.itos):
+#     if word in w2v.wv and i != PAD:
+#         embedding_weights[i] = torch.Tensor(w2v.wv[word])
+#
+# embedding_weights.to(device)
+def get_emb():
+    return nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=PAD)
 # %%
 class TextCNN(nn.Module):
 
@@ -97,10 +109,10 @@ class TextCNN(nn.Module):
         super().__init__()
         N_FILTERS = 50
         SIZES = [1, 2, 3, 5]
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=1)
         self.cnn = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(1, N_FILTERS, (i, EMB_DIM)),
+                nn.Conv2d(1, N_FILTERS, (i, EMBEDDING_DIM)),
                 nn.ReLU(),
                 nn.MaxPool2d((MAX_LEN - i + 1, 1))
             )
@@ -122,10 +134,10 @@ class TextCnnWithFusion(nn.Module):
         super().__init__()
         N_FILTERS = 50
         SIZES = [1, 2, 3, 5]
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=1)
         self.cnn = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(1, N_FILTERS, (i, EMB_DIM)),
+                nn.Conv2d(1, N_FILTERS, (i, EMBEDDING_DIM)),
                 nn.ReLU(),
                 nn.MaxPool2d((MAX_LEN - i + 1, 1))
             )
@@ -135,7 +147,7 @@ class TextCnnWithFusion(nn.Module):
 
         self.cnn2 = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(1, N_FILTERS, (i, EMB_DIM)),
+                nn.Conv2d(1, N_FILTERS, (i, EMBEDDING_DIM)),
                 nn.ReLU(),
                 nn.MaxPool2d((MAX_LEN - i + 1, 1))
             )
@@ -189,21 +201,21 @@ class TextCnnWithFusionAndContext(nn.Module):
         N_FILTERS = 50
         SIZES = [1, 3, 5]
         HIDDEN_DIM = N_FILTERS * len(SIZES)
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=1)
         self.cnn = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(1, N_FILTERS, (i, EMB_DIM), padding=(i//2, 0)),
+                nn.Conv2d(1, N_FILTERS, (i, EMBEDDING_DIM), padding=(i // 2, 0)),
                 nn.ReLU(),
                 # nn.MaxPool2d((MAX_LEN - i + 1, 1))
             )
             for i in SIZES
         ])
 
-        self.rnn = nn.LSTM(EMB_DIM, HIDDEN_DIM // 2, bidirectional=True)
+        self.rnn = nn.LSTM(EMBEDDING_DIM, HIDDEN_DIM // 2, bidirectional=True)
 
         self.finals = nn.ModuleList([
-            get_final(EMB_DIM, 100, 50),
-            get_final(EMB_DIM, 100, 50),
+            get_final(EMBEDDING_DIM, 100, 50),
+            get_final(EMBEDDING_DIM, 100, 50),
             get_final(HIDDEN_DIM, 100, 50),
             get_final(HIDDEN_DIM, 100, 50),
         ])
@@ -248,16 +260,16 @@ class CNN(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=1)
         FILTER_SIZE = 3
         POOLING_SIZE = 3
         self.cnn = nn.ModuleList([
             nn.Sequential(
-                nn.Conv1d(in_channels=EMB_DIM, out_channels=EMB_DIM, kernel_size=FILTER_SIZE),
+                nn.Conv1d(in_channels=EMBEDDING_DIM, out_channels=EMBEDDING_DIM, kernel_size=FILTER_SIZE),
                 nn.ReLU(),
                 nn.MaxPool1d(POOLING_SIZE)
             ) for _ in range(3)])
-        self.final = nn.Linear(EMB_DIM, 50)
+        self.final = nn.Linear(EMBEDDING_DIM, 50)
 
     def forward(self, x, x_len, mask):
         x = self.emb(x)
@@ -272,8 +284,8 @@ class CNN(nn.Module):
 class AvgEmbClassifier(nn.Module):
     def __init__(self):
         super().__init__()
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
-        self.RNN = nn.GRU(EMB_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True)
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=1)
+        self.RNN = nn.GRU(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True)
         self.final = nn.Linear(HIDDEN_DIM, 50, bias=False)
 
     def forward(self, x, x_len, mask):
@@ -287,8 +299,8 @@ class AvgEmbClassifier(nn.Module):
 class LSTMClassifier(nn.Module):
     def __init__(self):
         super().__init__()
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
-        self.RNN = nn.GRU(EMB_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True, num_layers=2)
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=1)
+        self.RNN = nn.GRU(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True, num_layers=2)
         self.final = nn.Linear(HIDDEN_DIM * 2, 50, bias=False)
 
     def forward(self, x, x_len, mask):
@@ -338,8 +350,8 @@ class AttentionClassifier(nn.Module):
         self.att2 = att2
         self.att = att
         HIDDEN_DIM_2 = HIDDEN_DIM * (4 if att else 2)
-        self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
-        self.RNN = nn.GRU(EMB_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True)
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=1)
+        self.RNN = nn.GRU(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True)
         self.RNN2 = nn.GRU(HIDDEN_DIM_2, HIDDEN_DIM_2, batch_first=True, bidirectional=True)
         self.W = nn.Linear(HIDDEN_DIM_2 * 2, HIDDEN_DIM_2 * 2)
         self.context_vector = Parameter(torch.randn(HIDDEN_DIM_2 * 2), requires_grad=True)
@@ -363,7 +375,67 @@ class AttentionClassifier(nn.Module):
             x = x.mean(-2)
         x = self.final(x).squeeze()
         return x
+class BiLSTM(nn.Module):
 
+    def __init__(self):
+        super().__init__()
+        HIDDEN_DIM = 200
+        self.emb = get_emb()
+        self.RNN = nn.GRU(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True, num_layers=2)
+        self.final = nn.Sequential(
+            nn.Linear(HIDDEN_DIM * 2, 200),
+            nn.ReLU(),
+            nn.Linear(200, 50)
+        )
+
+    def forward(self, x, x_len, mask):
+        x = self.emb(x)
+        x = self.RNN(x)[0]
+        x = x.max(-2)[0]
+        x = self.final(x)
+        return x.squeeze()
+
+
+class BiLSTMwithFusion(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        HIDDEN_DIM = 200
+        self.emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=PAD)
+        self.RNN = nn.GRU(2 * EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True, num_layers=1)
+        self.RNN2 = nn.GRU(4 * HIDDEN_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True, num_layers=1)
+        # self.final = nn.Linear(HIDDEN_DIM * 4, HIDDEN_DIM)
+        self.final = nn.Sequential(
+            nn.Linear(HIDDEN_DIM * 2, 200),
+            nn.ReLU(),
+            nn.Linear(200, 50)
+        )
+
+    def self_attention(self, x, mask):
+        a = torch.einsum('bne,bme->bnm', [x, x])
+        a = a.masked_fill(torch.eye(MAX_LEN, device=device, dtype=torch.uint8), 0)
+        a = F.softmax(a, -1)
+        a = a.masked_fill(torch.eye(MAX_LEN, device=device, dtype=torch.uint8), 0)
+        mask_2d = torch.einsum('bn,bm->bnm', [mask, mask])
+        a = a.masked_fill(1 - mask_2d, 0)
+        a = a / (a.sum(dim=-1, keepdim=True) + EPSILON)
+        x_hat = torch.einsum('bne,bnm->bne', [x, a])
+        return x_hat
+
+    def forward(self, x, x_len, mask):
+        x = self.emb(x)
+        x_hat = self.self_attention(x, mask)
+        x = torch.cat([x, x_hat], -1)
+        x = self.RNN(x)[0]  # BNH
+
+
+        x_hat2 = self.self_attention(x, mask)
+        x = torch.cat([x, x_hat2], -1)
+        x = self.RNN2(x)[0]
+        # x = x[:, -1, :]
+        x = x.max(-2)[0]
+        x = self.final(x)
+        return x
 
 # models = [
 #     AvgEmbClassifier().to(device),
@@ -372,7 +444,7 @@ class AttentionClassifier(nn.Module):
 #     AttentionClassifier(True).to(device)
 # ]
 
-
+#%%
 models = [
     # LSTMClassifier().to(device),
     # AttentionClassifier(False, False).to(device),
@@ -380,9 +452,11 @@ models = [
     # AttentionClassifier(True, False).to(device),
     # AttentionClassifier(True, True).to(device),
     # CNN().to(device),
-    TextCnnWithFusionAndContext().to(device),
+    # TextCnnWithFusionAndContext().to(device),
     TextCNN().to(device),
-    TextCnnWithFusion().to(device),
+    # TextCnnWithFusion().to(device),
+    BiLSTM().to(device),
+    # BiLSTMwithFusion().to(device)
 ]
 criterion = nn.CrossEntropyLoss()
 
@@ -397,10 +471,10 @@ for model in models:
         accu_total = 0
         total = 0
         # progress_bar = tqdm(train_data_loader)
-        for x, y in train_data_loader:
+        for (x, x_len), y in train_data_loader:
             optimizer.zero_grad()
-            mask = x[0] != PAD
-            prediction = model(x[0], x[1], mask)
+            mask = x != PAD
+            prediction = model(x, x_len, mask)
             loss = criterion(prediction, y.long())
             loss.backward()
             optimizer.step()
@@ -417,9 +491,9 @@ for model in models:
         loss_total_test = 0
         accu_total_test = 0
         total_test = 0
-        for x, y in test_data_loader:
-            mask = x[0] != PAD
-            prediction = model(x[0], x[1], mask)
+        for (x, x_len), y in test_data_loader:
+            mask = x != PAD
+            prediction = model(x, x_len, mask)
             loss = criterion(prediction, y.long())
 
             with torch.no_grad():
