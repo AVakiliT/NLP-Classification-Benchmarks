@@ -3,6 +3,7 @@ import os
 import pickle
 import random
 from collections import defaultdict, Counter
+from itertools import combinations
 
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -19,9 +20,12 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torchtext.data import Field, TabularDataset, BucketIterator
 from tqdm import tqdm
 
-torch.random.manual_seed(1)
-random.seed(1)
-np.random.seed(1)
+from new_utils import sliding_window
+
+SEED = 2
+torch.random.manual_seed(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
 # %%
 # DATASET = 'agnews'
 # MAX_LEN = 60
@@ -40,7 +44,7 @@ np.random.seed(1)
 
 DATASET = 'ng20'
 MAX_LEN = 200
-N_EPOCHS = 100
+N_EPOCHS = 25
 NUM_CLASSES = 20
 
 BATCH_SIZE = 32
@@ -80,69 +84,74 @@ test = TabularDataset(
     skip_header=True
 )
 
-TEXT.build_vocab(train, min_freq=MIN_FREQ)
+TEXT.build_vocab(train, test, min_freq=MIN_FREQ)
 
 PAD = 1
 
 
 # %%
 
-def load_graph_and_labels(train=True, inv=None, pmi_c=None):
+def load_graph_and_labels():
     df = pd.read_csv(DATASET + '/train_clean.csv')
-    df_test = pd.read_csv(DATASET + '/train_clean.csv')
+    df_test = pd.read_csv(DATASET + '/test_clean.csv')
     labels = df.label
     labels_test = df_test.label
-    fname = 'stuff/' + DATASET + '_15.graph.npy'
-    if os.path.exists(fname):
+    fname = 'stuff/' + DATASET + '_fixed.txtgcn.npy'
+    if False: #os.path.exists(fname):
         m_all = np.load(fname)
     else:
         def vectorize_string(s, stoi=TEXT.vocab.stoi):
             return [stoi[i] for i in s.split(' ')]
 
-        train_vectors = df.text.apply(vectorize_string)
-        test_vectors = df_test.text.apply(vectorize_string)
+        train_vectors = df.text.apply(vectorize_string).to_list()
+        test_vectors = df_test.text.apply(vectorize_string).to_list()
 
         n_docs = len(train_vectors) + len(test_vectors)
         VOCAB_SIZE = len(TEXT.vocab.itos)
 
-        co_occur = np.zeros((VOCAB_SIZE, VOCAB_SIZE))
-        for v in tqdm(train_vectors):
-            for i in range(len(v)):
-                for j in v[max(i - 15, 0):min(i + 15, len(v))]:
-                    co_occur[v[i]][j] += 1
-                    co_occur[j][v[i]] += 1
-
-        def pmi(i, j):
-            return co_occur[i, j] / (TEXT.vocab.freqs[TEXT.vocab.itos[i]] * TEXT.vocab.freqs[TEXT.vocab.itos[j]])
-
-        pmi_m = np.zeros((VOCAB_SIZE, VOCAB_SIZE))
-        for i in tqdm(range(2, len(TEXT.vocab.itos))):
-            for j in range(2, len(TEXT.vocab.itos)):
-                pmi_m[i, j] = pmi(i, j)
-
-        pmi_c = pmi_m[2:, 2:]
-        np.fill_diagonal(pmi_c, 1)
+        # co_occur = np.full((VOCAB_SIZE, VOCAB_SIZE), 0)
+        # occur = np.zeros(VOCAB_SIZE)
+        # n_windows = 0
+        # for v in tqdm(train_vectors + test_vectors):
+        #     for window in sliding_window(v, 15):
+        #         n_windows += 1
+        #         window = set(window)
+        #         for i in window:
+        #             occur[i] += 1
+        #         for i, j in combinations(window, 2):
+        #             co_occur[i, j] += 1
+        #             co_occur[j, i] += 1
+        #
+        #
+        # def pmi(i, j):
+        #     if co_occur[i, j] == 0:
+        #         return -INF
+        #     pmi = np.log2((co_occur[i][j] * n_docs) / (occur[i] * occur[j]))
+        #     # npmi
+        #     return pmi
+        #
+        # pmi_m = np.zeros((VOCAB_SIZE, VOCAB_SIZE))
+        # for i in tqdm(range(2, len(TEXT.vocab.itos))):
+        #     for j in range(2, len(TEXT.vocab.itos)):
+        #         pmi_m[i, j] = pmi(i, j)
+        #
+        # pmi_c = pmi_m[2:, 2:]
+        # # np.fill_diagonal(pmi_c, 1)
+        #
+        # pmi_c[pmi_c < 0] = 0
 
         inv = defaultdict(Counter)
-        for d, v in enumerate(tqdm(train_vectors)):
+        for d, v in enumerate(tqdm(train_vectors + test_vectors)):
             for w in v:
                 inv[w][d] += 1
 
-        for d, v in enumerate(tqdm(test_vectors)):
-            for w in v:
-                inv[w][d + len(train_vectors)] += 1
-
-
-        def tf_idf(w, d):
-            return inv[w][d] / len(inv[w])
-
         tfidf_m = np.zeros((VOCAB_SIZE, n_docs))
-        for i in tqdm(range(2, VOCAB_SIZE)):
-            for j in range(n_docs):
-                tfidf_m[i][j] = tf_idf(i, j)
+        for w, dc in inv.items():
+            for d, c in dc.items():
+                tfidf_m[w][d] = c / len(dc)
 
         m_all = np.zeros((VOCAB_SIZE - 2 + n_docs, VOCAB_SIZE - 2 + n_docs))
-        m_all[:(VOCAB_SIZE - 2), :(VOCAB_SIZE - 2)] = pmi_c
+        # m_all[:(VOCAB_SIZE - 2), :(VOCAB_SIZE - 2)] = pmi_c
         m_all[(VOCAB_SIZE - 2):, :(VOCAB_SIZE - 2)] = tfidf_m[2:].T
         m_all[:(VOCAB_SIZE - 2), (VOCAB_SIZE - 2):] = tfidf_m[2:]
         np.fill_diagonal(m_all, 1)
@@ -199,7 +208,7 @@ class GCN(nn.Module):
 
     def forward(self, x, adj):
         x = F.relu(self.gc1(x, adj))
-        # x = F.dropout(x, self.dropout, training=self.training)
+        x = F.dropout(x, self.dropout, training=self.training)
         x = self.gc2(x, adj)
         return x
 
@@ -210,21 +219,18 @@ model = GCN(A.shape[0], 200, NUM_CLASSES, 0.5).to(device)
 # %%
 
 def get_adj(A):
-    D = A.sum(1)
+    D = A.sum(1) ** -0.5
     D = np.diag(D)
-    # D_inv = np.linalg.matrix_power(D, -1)
-    D_hi = D ** -0.5
-    D_hi[D_hi == np.inf] = 0
-    # D_h = fractional_matrix_power(D, 0.5)
 
     AA = sparse.coo_matrix(A)
-    DD_hi = sparse.coo_matrix(D_hi)
+    DD_hi = sparse.coo_matrix(D)
     AADJ = DD_hi @ AA @ DD_hi
     return AADJ
 
 
 ADJ = get_adj(A)
 ADJ = sparse.coo_matrix(ADJ)
+
 
 # %%
 
@@ -255,10 +261,10 @@ for i in range(N_EPOCHS):
     loss.backward()
     optim.step()
     acc = (prediction.argmax(1) == train_labels).float().mean().item()
-    print(i, 'trn', np.round(loss.item(),3), np.round(acc,3))
+    print(i, 'trn', np.round(loss.item(), 3), np.round(acc, 3))
     model.eval()
     prediction_test = out[(len(TEXT.vocab.itos) - 2 + len(train_labels)):]
     loss = criterion(prediction_test, test_labels)
 
     acc = (prediction_test.argmax(1) == test_labels).float().mean().item()
-    print(i, 'tst', np.round(loss.item(),3), np.round(acc, 3))
+    print(i, 'tst', np.round(loss.item(), 3), np.round(acc, 3))

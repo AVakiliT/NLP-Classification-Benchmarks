@@ -10,6 +10,7 @@ import seaborn as sns
 import gensim
 import numpy as np
 import torch
+from scipy import sparse
 from texttable import Texttable
 from torch import nn
 from torch.nn import functional as F, Parameter, init
@@ -17,10 +18,13 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torchtext.data import Field, TabularDataset, BucketIterator
 from tqdm import tqdm
 
-torch.random.manual_seed(1)
-random.seed(1)
-np.random.seed(1)
+SEED = 1
+
+torch.random.manual_seed(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
 # %%
+print('Reading Dataset...')
 # DATASET = 'agnews'
 # MAX_LEN = 60
 # N_EPOCHS = 12
@@ -48,7 +52,7 @@ EMBEDDING_DIM = 100
 EPSILON = 1e-13
 INF = 1e13
 HIDDEN_DIM = 100
-PAD_FIRST = True
+PAD_FIRST = False
 TRUNCATE_FIRST = False
 SORT_BATCHES = False
 
@@ -122,60 +126,80 @@ class TrainIterWrap:
 train_data_loader = TrainIterWrap(train_iter)
 test_data_loader = TrainIterWrap(test_iter)
 
-# %%
-
-df = pd.read_csv(DATASET + '/train_clean.csv')
-
-
-def vectorize_string(s, stoi=TEXT.vocab.stoi):
-    return [stoi[i] for i in s.split(' ')]
-
-
-string_vectors = df.text.apply(vectorize_string)
-VOCAB_SIZE = len(TEXT.vocab.itos)
-
-co_occur = np.zeros((VOCAB_SIZE, VOCAB_SIZE))
-for v in tqdm(string_vectors):
-    for i in range(len(v)):
-        for j in v[max(i - 15, 0):min(i + 15, len(v))]:
-            co_occur[v[i]][j] += 1
-            co_occur[j][v[i]] += 1
-
-
-def pmi(i, j):
-    return co_occur[i, j] / (TEXT.vocab.freqs[TEXT.vocab.itos[i]] * TEXT.vocab.freqs[TEXT.vocab.itos[j]])
-
-
-pmi_m = np.zeros((VOCAB_SIZE, VOCAB_SIZE))
-for i in tqdm(range(2, len(TEXT.vocab.itos))):
-    for j in range(2, len(TEXT.vocab.itos)):
-        pmi_m[i, j] = pmi(i, j)
-
-pmi_c = pmi_m[2:, 2:]
-np.fill_diagonal(pmi_c, 1)
-
-inv = defaultdict(Counter)
-for d, v in enumerate(tqdm(string_vectors)):
-    for w in v:
-        inv[w][d] += 1
-
-def tf_idf(w,d):
-    return inv[w][d] / len(inv[w])
-
-tfidf_m = np.zeros((VOCAB_SIZE, len(string_vectors)))
-for i in tqdm(range(2, VOCAB_SIZE)):
-    for j in range(len(string_vectors)):
-        tfidf_m[i][j] = tf_idf(i, j)
-
-m_all = np.zeros((VOCAB_SIZE - 2 + len(string_vectors), VOCAB_SIZE - 2 + len(string_vectors)))
-m_all[:(VOCAB_SIZE - 2), :(VOCAB_SIZE - 2)] = pmi_c
-m_all[(VOCAB_SIZE -2):, :(VOCAB_SIZE -2)] = tfidf_m[2:].T
-m_all[:(VOCAB_SIZE -2), (VOCAB_SIZE -2):] = tfidf_m[2:]
-np.fill_diagonal(m_all, 1)
-
-np.save('stuff/' + DATASET + '_15.graph', m_all)
 
 # %%
+
+def load_graph():
+    df = pd.read_csv(DATASET + '/train_clean.csv')
+    fname = 'stuff/' + DATASET + '_15_new.pmi.npy'
+    if False:  # os.path.exists(fname):
+        A = np.load(fname)
+    else:
+        def vectorize_string(s, stoi=TEXT.vocab.stoi):
+            return [stoi[i] for i in s.split(' ')]
+
+        train_vectors = df.text.apply(vectorize_string)
+
+        n_docs = len(train_vectors)
+        VOCAB_SIZE = len(TEXT.vocab.itos)
+
+        word_to_class = np.zeros((VOCAB_SIZE, NUM_CLASSES))
+        for s, l in (zip(train_vectors, df.label)):
+            for w in set(s):
+                word_to_class[w][l] += 1
+
+        word_occur = word_to_class.sum(1)
+        label_occur = Counter(df.label)
+
+        def pmi(w, l):
+            if word_to_class[w][l] == 0:
+                return -1
+            return (np.log2((word_to_class[w][l] * n_docs) / (word_occur[w] * label_occur[l]))) / np.log2(
+                word_to_class[w][l] / n_docs)
+
+        word_pmi = np.zeros((VOCAB_SIZE, NUM_CLASSES))
+        for i in range(VOCAB_SIZE):
+            for j in range(NUM_CLASSES):
+                word_pmi[i][j] = pmi(i, j)
+
+        wc = word_pmi[2:]
+        wc[wc < 0] = 0
+        # word_to_class = (word_to_class.T / word_to_class.sum(1)).T
+        # word_to_class = ((word_to_class / word_to_class.sum(0)))
+
+        A = np.zeros((VOCAB_SIZE - 2 + NUM_CLASSES, VOCAB_SIZE - 2 + NUM_CLASSES))
+        # A[:VOCAB_SIZE - 2, :VOCAB_SIZE - 2] = pmi_m[2:, 2:]
+        A[VOCAB_SIZE - 2:, :VOCAB_SIZE - 2] = wc.T
+        A[:VOCAB_SIZE - 2, VOCAB_SIZE - 2:] = wc
+        np.fill_diagonal(A, 1)
+        np.save(fname, A)
+    return A
+
+
+# %%
+def get_adj(A):
+    D = A.sum(1) ** -0.5
+    D = np.diag(D)
+
+    AA = sparse.coo_matrix(A)
+    DD_hi = sparse.coo_matrix(D)
+    AADJ = DD_hi @ AA @ DD_hi
+    return AADJ
+
+
+def sparse2torch(coo):
+    values = coo.data
+    indices = np.vstack((coo.row, coo.col))
+
+    i = torch.LongTensor(indices)
+    v = torch.FloatTensor(values)
+    shape = coo.shape
+
+    return torch.sparse.FloatTensor(i, v, torch.Size(shape)).to_dense()
+
+
+# %%
+print('Reading Embeddings...')
 w2v = gensim.models.KeyedVectors.load_word2vec_format('/home/amir/IIS/Datasets/embeddings/glove.6B.100d.txt.w2vformat',
                                                       binary=True)
 
@@ -191,7 +215,7 @@ for i, word in enumerate(TEXT.vocab.itos):
         if i == PAD:
             embedding_weights[i] = torch.zeros(EMBEDDING_DIM)
 
-print(len(unmatch) * 100 / len(TEXT.vocab.itos), '% embedding no match')
+print(len(unmatch) * 100 / len(TEXT.vocab.itos), '% of embeddings didn\'t match')
 
 embedding_weights.to(device)
 
@@ -201,6 +225,53 @@ def get_emb():
 
 
 # %%
+
+class GraphConvolution(nn.Module):
+    """
+    Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
+    """
+
+    def __init__(self, in_features, out_features, bias=True):
+        super(GraphConvolution, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = Parameter(torch.FloatTensor(in_features, out_features))
+        if bias:
+            self.bias = Parameter(torch.FloatTensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.uniform_(-stdv, stdv)
+
+    def forward(self, input, adj):
+        support = input @ self.weight
+        output = adj @ support
+        if self.bias is not None:
+            return output + self.bias
+        else:
+            return output
+
+
+class GCN(nn.Module):
+    def __init__(self, nfeat, nhid, nclass, dropout):
+        super(GCN, self).__init__()
+
+        self.gc1 = GraphConvolution(nfeat, nhid)
+        self.gc2 = GraphConvolution(nhid, nclass)
+        self.dropout = dropout
+
+    def forward(self, x, adj):
+        x = F.relu(self.gc1(x, adj))
+        x = F.dropout(x, self.dropout, training=self.training)
+        x = self.gc2(x, adj)
+        return x
+
+
 class TextCNN(nn.Module):
 
     def __init__(self):
@@ -440,10 +511,11 @@ class SwemHier(nn.Module):
 
 
 class RNN(nn.Module):
-    def __init__(self, rnn=nn.LSTM, bidirectional=False, num_layers=1):
+    def __init__(self, rnn=nn.LSTM, bidirectional=False, num_layers=1, bias=True):
         super().__init__()
         self.emb = get_emb()
-        self.RNN = rnn(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=bidirectional, num_layers=num_layers)
+        self.RNN = rnn(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=bidirectional,
+                       num_layers=num_layers, bias=bias)
         self.final = get_final(EMBEDDING_DIM * (2 if bidirectional else 1), EMBEDDING_DIM // 2)
 
         self.name = ('Bi' if bidirectional else '') + type(self.RNN).__name__ + (
@@ -452,15 +524,39 @@ class RNN(nn.Module):
     def forward(self, x, x_len, mask):
         x = self.emb(x)
 
-        # x = pack_padded_sequence(x, x_len, batch_first=True)
+        x = pack_padded_sequence(x, x_len, batch_first=True)
         x = self.RNN(x)[0]
-        # x = pad_packed_sequence(x, batch_first=True)[0]
+        x = pad_packed_sequence(x, batch_first=True)[0]
 
-        x = x[:, -1, :]
-        # x = torch.stack([x[i, l - 1] for i, l in enumerate(x_len)])
+        # x = x[:, -1, :]
+        x = x[[torch.arange(0, x.shape[0]), x_len - 1]]
 
         x = self.final(x).squeeze()
         return x
+
+
+class GhettoRNN(nn.Module):
+    def __init__(self, rnn=nn.LSTM, bidirectional=False, num_layers=1):
+        super().__init__()
+        self.emb = get_emb()
+        self.RNN = rnn(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True,
+                       num_layers=num_layers, bias=True)
+        if bidirectional:
+            self.RNN_2 = rnn(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True,
+                             num_layers=num_layers, bias=True)
+        self.final = get_final(EMBEDDING_DIM * (2 if bidirectional else 1), EMBEDDING_DIM // 2)
+
+        self.name = ('Bi' if bidirectional else '') + type(self.RNN).__name__ + (
+            'x' + str(num_layers) if num_layers > 1 else '')
+
+    def forward(self, x, x_len, mask):
+        xx = self.emb(x)
+
+        xx_1 = self.RNN(xx)[0]
+        xx_1 = xx_1[[torch.arange(0, xx_1.shape[0]), x_len - 1]]
+
+        xx_1 = self.final(xx_1).squeeze()
+        return xx_1
 
 
 class BiLSTMwithFusion(nn.Module):
@@ -579,10 +675,54 @@ class leam(nn.Module):
         self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
 
     def forward(self, x, x_len, mask):
-        x = self.emb(x)
-        g = torch.einsum('ce,bse->bcs', [self.label_vectors, x])
+        xx = self.emb(x)
+        g = torch.einsum('ce,bse->bcs', [self.label_vectors, xx])
         # g_hat = self.label_vectors.norm(dim=-1, keepdim=True) @ x.norm(dim=-1, keepdim=True).transpose(-2, -1)
-        g_hat = torch.einsum('c,bs->bcs', [self.label_vectors.norm(dim=-1),
+        g_hat = torch.einsum('c,bs->bcs', [self.label_vectors.norm(dim=-1), xx.norm(dim=-1)])
+        g_hat[g_hat == 0] = EPSILON
+        g = g / g_hat
+        u = F.relu(self.conv(g))  # BCS
+        # u =g
+        m = u.max(1)[0]  # BS
+        b = m.masked_fill(mask ^ 1, -INF)
+        b = F.softmax(b, -1)
+        z = torch.einsum('bse,bs->be', [xx, b])
+
+        z = self.final(z)
+
+        # z = (torch.einsum('be,ce->bc', [z, self.label_vectors]) / torch.einsum('b,c->bc', [z.norm(dim=-1), self.label_vectors.norm(dim=-1)]))
+
+        return z
+
+
+class LeamWithGraphEmbed(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.emb = get_emb()
+        # self.label_vectors = nn.Parameter(torch.randn(NUM_CLASSES, EMBEDDING_DIM))
+        self.label_vectors = nn.Parameter(
+            (torch.Tensor(np.tile(np.eye(NUM_CLASSES) / math.sqrt(EMBEDDING_DIM), EMBEDDING_DIM // NUM_CLASSES))),
+            requires_grad=False)
+        # # nn.init.uniform_(self.label_vectors, -1/math.sqrt(EMBEDDING_DIM), 1/math.sqrt(EMBEDDING_DIM))
+        self.conv = nn.Conv1d(NUM_CLASSES, NUM_CLASSES, kernel_size=51, stride=1, padding=25)
+        self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
+        self.gcn = GCN(EMBEDDING_DIM, EMBEDDING_DIM, EMBEDDING_DIM, 0)
+
+    def forward(self, x, x_len, mask):
+        x = self.emb(x)
+
+        ##
+        inp = torch.cat([self.emb.weight[2:], self.label_vectors])
+        out = self.gcn(inp, adj)  # (V-2+C)E
+        new_lv = out[-NUM_CLASSES:]
+        # new_lv = F.relu(self.lv2lv(new_lv))
+        # new_lv = self.label_vectors
+        ##
+
+        g = torch.einsum('ce,bse->bcs', [new_lv, x])
+        # g_hat = self.label_vectors.norm(dim=-1, keepdim=True) @ x.norm(dim=-1, keepdim=True).transpose(-2, -1)
+        g_hat = torch.einsum('c,bs->bcs', [new_lv.norm(dim=-1),
                                            x.norm(dim=-1)])
         g_hat[g_hat == 0] = 1
         g = g / g_hat
@@ -639,10 +779,10 @@ class RnnWithAdditiveSourceAttention(nn.Module):
     def __init__(self):
         super().__init__()
         self.emb = get_emb()
-        self.RNN = nn.GRU(EMBEDDING_DIM, HIDDEN_DIM)
-        self.att = self.SourceAdditiveAttention(EMBEDDING_DIM * 2)
-        self.final = get_final(HIDDEN_DIM, HIDDEN_DIM // 2)
-        self.name = 'GRU_T2S+'
+        self.RNN = nn.GRU(EMBEDDING_DIM, HIDDEN_DIM, batch_first=True, bidirectional=True)
+        self.att = self.SourceAdditiveAttention(EMBEDDING_DIM * 3)
+        self.final = get_final(HIDDEN_DIM * 2, HIDDEN_DIM // 2)
+        self.name = 'BiGRU_T2S+'
 
     def forward(self, x, x_len, mask):
         x = self.emb(x)
@@ -653,37 +793,6 @@ class RnnWithAdditiveSourceAttention(nn.Module):
         xx = self.att(xx, xh, mask ^ 1)
         xx = self.final(xx)
         return xx
-
-
-class leam2(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        HIDDEN_DIM = 200
-        self.emb = get_emb()
-        self.label_vectors = nn.Parameter(torch.randn(NUM_CLASSES, EMBEDDING_DIM))
-        self.conv = nn.ModuleList([
-            nn.Conv1d(NUM_CLASSES, NUM_CLASSES, i, 1, i // 2) for i in [1, 3, 5]
-        ])
-        self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
-
-    def forward(self, x, x_len, mask):
-        x = self.emb(x)
-        g = torch.einsum('ce,bse->bcs', [self.label_vectors, x])
-        g_hat = self.label_vectors.norm(dim=-1, keepdim=True) @ x.norm(dim=-1, keepdim=True).transpose(-2, -1)
-        g_hat[g_hat == 0] = 1
-        g = g / g_hat
-        u = sum([conv(g) for conv in self.conv]) / 3
-        m = F.max_pool1d(u.transpose(-2, -1), NUM_CLASSES).squeeze(-1)
-        b = F.softmax(m, -1)
-        b = b.masked_fill(mask ^ 1, 0)
-        b = b / (b.sum(dim=-1, keepdim=True) + EPSILON)
-
-        z = torch.einsum('bse,bs->be', [x, b])
-
-        z = self.final(z)
-
-        return z
 
 
 class DiSAN(nn.Module):
@@ -733,7 +842,14 @@ class DiSAN(nn.Module):
 
 
 # %%
-
+# print('building graph')
+# A = load_graph()
+# print('building adj')
+# ADJ = get_adj(A)
+# ADJ = sparse.coo_matrix(ADJ)
+# adj = sparse2torch(ADJ).to(device)
+# INP = sparse2torch(sparse.coo_matrix(np.eye(*adj.shape))).to(device)
+# %%
 
 # model = AttentionClassifier(False, False)
 # model = AttentionClassifier(False, True)
@@ -750,11 +866,13 @@ model = DiSAN()
 # model = SwemHier()
 # model = TextCNN()
 # model = TextCnnWithFusion()
-# model = RNN(nn.LSTM, bidirectional=False, num_layers=1)
+# model = RNN(nn.GRU, bidirectional=True, num_layers=1, bias=True); N_EPOCHS = N_EPOCHS * 2
+# model = GhettoRNN(nn.LSTM, bidirectional=False, num_layers=1); N_EPOCHS = N_EPOCHS * 2
 # model = RNN(nn.GRU, bidirectional=False, num_layers=1)
 # model = RNN(nn.GRU, bidirectional=True, num_layers=1)
 # model = BiLSTMwithFusion()
 # model = RnnWithAdditiveSourceAttention()
+# model = LeamWithGraphEmbed()
 
 # N_EPOCHS = 25
 
@@ -846,6 +964,8 @@ t = Texttable()
 t.add_rows(rows, header=False)
 t.header(('Model', 'Acc Train', 'Acc Test'))
 print(t.draw())
+with open('metrics.txt', 'w') as f:
+    print(t.draw(), file=f)
 # %%
 sns.set()
 plt.clf()

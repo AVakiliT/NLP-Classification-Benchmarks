@@ -6,16 +6,15 @@ from tqdm import tqdm
 torch.manual_seed(1)
 BATCH_SIZE = 128
 LR = 1e-3
-N_EPOCHS = 30
+
 MIN_FREQ = 8
 EMB_DIM = 100
 HIDDEN_DIM = 100
-MAX_LEN = 800
 EPSILON = 1e-13
-NUM_CLASSES = 50
+
 # folder = '/home/amir/IIS/Datasets/new_V2/Ubuntu_corpus_V2/'
-# device = torch.device('cpu')
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+device = torch.device('cpu')
+# device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN, tokenize=lambda x: x.split(), include_lengths=True,
              batch_first=True, pad_first=True, truncate_first=True)
@@ -25,15 +24,20 @@ LABEL = Field(sequential=False, use_vocab=False, batch_first=True)
 columns = [('text', TEXT),
            ('label', LABEL)]
 
+DATASET = 'agnews'
+MAX_LEN = 60
+N_EPOCHS = 12
+NUM_CLASSES = 4
+
 train = TabularDataset(
-    path='train_clean.csv',
+    path=DATASET + '/train_clean.csv',
     format='csv',
     fields=columns,
     skip_header=True
 )
 
 test = TabularDataset(
-    path='test_clean.csv',
+    path=DATASET + '/test_clean.csv',
     format='csv',
     fields=columns,
     skip_header=True
@@ -152,9 +156,10 @@ class CapsNet(nn.Module):
         self.emb = nn.Embedding(len(TEXT.vocab), EMB_DIM, padding_idx=1)
 
     def forward(self, x):
-        mask = data[0] == PAD
+        mask = x == PAD
         xx = self.emb(x)
-        xx, att_reg = self.primary(self.first_layer(xx), mask)
+        xx = self.first_layer(xx)
+        xx, att_reg = self.primary(xx, mask)
         return self.digits(xx), att_reg
 
 
@@ -188,6 +193,8 @@ def one_hot(y):
 model = CapsNet().to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 reconstruction_criterion = nn.MSELoss(reduction='sum')
+
+#%%
 
 pbar = tqdm(range(1, N_EPOCHS))
 for i_epoch in pbar:
