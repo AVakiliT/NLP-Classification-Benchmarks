@@ -6,15 +6,26 @@ from tqdm import tqdm
 torch.manual_seed(1)
 BATCH_SIZE = 128
 LR = 1e-3
-
 MIN_FREQ = 8
 EMB_DIM = 100
 HIDDEN_DIM = 100
 EPSILON = 1e-13
 
+
+
+# DATASET = 'agnews'
+# MAX_LEN = 60
+# N_EPOCHS = 12
+# NUM_CLASSES = 4
+
+DATASET = 'reuters50'
+MAX_LEN = 800
+N_EPOCHS = 25
+NUM_CLASSES = 50
+
 # folder = '/home/amir/IIS/Datasets/new_V2/Ubuntu_corpus_V2/'
-device = torch.device('cpu')
-# device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+# device = torch.device('cpu')
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN, tokenize=lambda x: x.split(), include_lengths=True,
              batch_first=True, pad_first=True, truncate_first=True)
@@ -24,10 +35,7 @@ LABEL = Field(sequential=False, use_vocab=False, batch_first=True)
 columns = [('text', TEXT),
            ('label', LABEL)]
 
-DATASET = 'agnews'
-MAX_LEN = 60
-N_EPOCHS = 12
-NUM_CLASSES = 4
+
 
 train = TabularDataset(
     path=DATASET + '/train_clean.csv',
@@ -102,7 +110,7 @@ class FirstLayer(nn.Module):
         self.rnn = nn.GRU(100, 96, bidirectional=True)
 
     def forward(self, x):
-        # return torch.cat([F.relu(c(x.transpose(1, 2))) for c in self.convs], 1).transpose(1, 2)
+        # temp = torch.cat([F.relu(c(x.transpose(1, 2))) for c in self.convs], 1).transpose(1, 2)
         return self.rnn(x)[0]
 
 
@@ -194,7 +202,7 @@ model = CapsNet().to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 reconstruction_criterion = nn.MSELoss(reduction='sum')
 
-#%%
+# %%
 
 pbar = tqdm(range(1, N_EPOCHS))
 for i_epoch in pbar:
@@ -207,7 +215,7 @@ for i_epoch in pbar:
         output, att_reg = model(data[0])
         target_one_hot = one_hot(target)
 
-        loss = margin_loss(output, target_one_hot) #+ 5e-4 * att_reg
+        loss = margin_loss(output, target_one_hot)  # + 5e-4 * att_reg
 
         loss.backward()
         optimizer.step()
@@ -224,7 +232,7 @@ for i_epoch in pbar:
         output, att_reg = model(data[0])
         target_one_hot = one_hot(target)
 
-        loss = margin_loss(output, target_one_hot) #+ 5e-4 * att_reg
+        loss = margin_loss(output, target_one_hot)  # + 5e-4 * att_reg
 
         loss_total_test += loss.item()
         acc_total_test += (torch.argmax(norm_squared(output), 1).squeeze(-1).long() == target.long()).sum().item()
@@ -236,4 +244,3 @@ for i_epoch in pbar:
             loss_total / total, acc_total / total,
             loss_total_test / total_test, acc_total_test / total_test
         ))
-

@@ -25,10 +25,11 @@ random.seed(SEED)
 np.random.seed(SEED)
 # %%
 print('Reading Dataset...')
-# DATASET = 'agnews'
-# MAX_LEN = 60
-# N_EPOCHS = 12
-# NUM_CLASSES = 4
+
+DATASET = 'agnews'
+MAX_LEN = 60
+N_EPOCHS = 12
+NUM_CLASSES = 4
 
 # DATASET = 'reuters50'
 # MAX_LEN = 800
@@ -40,10 +41,10 @@ print('Reading Dataset...')
 # N_EPOCHS = 4
 # NUM_CLASSES = 5
 
-DATASET = 'ng20'
-MAX_LEN = 200
-N_EPOCHS = 18
-NUM_CLASSES = 20
+# DATASET = 'ng20'
+# MAX_LEN = 200
+# N_EPOCHS = 18
+# NUM_CLASSES = 20
 
 BATCH_SIZE = 32
 LR = 1e-3
@@ -55,6 +56,8 @@ HIDDEN_DIM = 100
 PAD_FIRST = False
 TRUNCATE_FIRST = False
 SORT_BATCHES = False
+
+print('Dataset ' + DATASET + ' loaded.')
 
 # device = torch.device('cpu')
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -830,7 +833,7 @@ class DiSAN(nn.Module):
         h1 = self.W1(h)
         h2 = self.W2(h)
         att = self.c * torch.tanh((h1.unsqueeze(2) + h2.unsqueeze(1) + self.b) / self.c)  # BLLE
-        mask_2d = (mask.unsqueeze(1).__and__(mask.unsqueeze(2)) ^ 1).unsqueeze(-1)  # LL1
+        mask_2d = (mask.unsqueeze(1).__or__(mask.unsqueeze(2)) ^ 1).unsqueeze(-1)  # LL1
         att = att.masked_fill(mask_2d, -INF)  # BLLE
         u_fw = self.multi_dim_masked_attention(h, att, self.fw_mask)  # BLE
         u_bw = self.multi_dim_masked_attention(h, att, self.bw_mask)  # BLE
