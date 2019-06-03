@@ -26,10 +26,10 @@ np.random.seed(SEED)
 # %%
 print('Reading Dataset...')
 
-DATASET = 'agnews'
-MAX_LEN = 60
-N_EPOCHS = 12
-NUM_CLASSES = 4
+# DATASET = 'agnews'
+# MAX_LEN = 60
+# N_EPOCHS = 12
+# NUM_CLASSES = 4
 
 # DATASET = 'reuters50'
 # MAX_LEN = 800
@@ -41,10 +41,10 @@ NUM_CLASSES = 4
 # N_EPOCHS = 4
 # NUM_CLASSES = 5
 
-# DATASET = 'ng20'
-# MAX_LEN = 200
-# N_EPOCHS = 18
-# NUM_CLASSES = 20
+DATASET = 'ng20'
+MAX_LEN = 200
+N_EPOCHS = 18
+NUM_CLASSES = 20
 
 BATCH_SIZE = 32
 LR = 1e-3
@@ -53,7 +53,7 @@ EMBEDDING_DIM = 100
 EPSILON = 1e-13
 INF = 1e13
 HIDDEN_DIM = 100
-PAD_FIRST = False
+PAD_FIRST = True
 TRUNCATE_FIRST = False
 SORT_BATCHES = False
 
@@ -467,6 +467,23 @@ class SwemAvg(nn.Module):
         xx = self.final(xx)
         return xx
 
+class Swem_T2Sm(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.emb = get_emb()
+        self.source = nn.Parameter(torch.ones(EMBEDDING_DIM) / math.sqrt(EMBEDDING_DIM))
+        self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
+
+    def forward(self, x, x_len, mask):
+        xx = self.emb(x)
+        att_scores = torch.einsum('bse,e->bs', [xx, self.source])
+        att_scores = att_scores.masked_fill(mask ^ 1, -INF)
+        att_scores = F.softmax(att_scores, -1)
+        xx = torch.einsum('bse,bs->be', [xx, att_scores])
+        xx = xx / x_len.unsqueeze(1).float()
+        xx = self.final(xx)
+        return xx
+
 
 class SwemMax(nn.Module):
     def __init__(self):
@@ -833,7 +850,7 @@ class DiSAN(nn.Module):
         h1 = self.W1(h)
         h2 = self.W2(h)
         att = self.c * torch.tanh((h1.unsqueeze(2) + h2.unsqueeze(1) + self.b) / self.c)  # BLLE
-        mask_2d = (mask.unsqueeze(1).__or__(mask.unsqueeze(2)) ^ 1).unsqueeze(-1)  # LL1
+        mask_2d = ((mask.unsqueeze(1) ^ 1).__or__(mask.unsqueeze(2)) ^ 1).unsqueeze(-1)  # LL1
         att = att.masked_fill(mask_2d, -INF)  # BLLE
         u_fw = self.multi_dim_masked_attention(h, att, self.fw_mask)  # BLE
         u_bw = self.multi_dim_masked_attention(h, att, self.bw_mask)  # BLE
@@ -862,10 +879,11 @@ class DiSAN(nn.Module):
 # model = TextCnnWithFusionAndContext()
 # model = leam2()
 # model = leam()
-model = DiSAN()
-# model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
+# model = DiSAN()
+model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemMax(); N_EPOCHS = N_EPOCHS * 2
-# model = SwemConcat(); N_EPOCHS = N_EPOCHS * 2
+# model = SwemConcat();
+# N_EPOCHS = N_EPOCHS * 2
 # model = SwemHier()
 # model = TextCNN()
 # model = TextCnnWithFusion()
@@ -876,6 +894,8 @@ model = DiSAN()
 # model = BiLSTMwithFusion()
 # model = RnnWithAdditiveSourceAttention()
 # model = LeamWithGraphEmbed()
+# model = Swem_T2Sm(); N_EPOCHS *= 2
+
 
 # N_EPOCHS = 25
 
@@ -967,7 +987,7 @@ t = Texttable()
 t.add_rows(rows, header=False)
 t.header(('Model', 'Acc Train', 'Acc Test'))
 print(t.draw())
-with open('metrics.txt', 'w') as f:
+with open('metrics/' + DATASET + '.txt', 'w') as f:
     print(t.draw(), file=f)
 # %%
 sns.set()
