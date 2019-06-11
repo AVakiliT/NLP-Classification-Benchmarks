@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from scipy import sparse
 from sklearn.cluster import KMeans
+from spacy.lang import punctuation
+from spacy.lang.en import stop_words
 from texttable import Texttable
 from torch import nn
 from torch.nn import functional as F, Parameter, init
@@ -27,27 +29,27 @@ np.random.seed(SEED)
 # %%
 print('Reading Dataset...')
 
-# DATASET = 'agnews'
-# MAX_LEN = 60
-# N_EPOCHS = 12
-# NUM_CLASSES = 4
+DATASET = 'agnews'
+MAX_LEN = 60
+N_EPOCHS = 12
+NUM_CLASSES = 4
 
 # DATASET = 'reuters50'
 # MAX_LEN = 800
 # N_EPOCHS = 25
 # NUM_CLASSES = 50
 
-DATASET = 'yelp_full'
-MAX_LEN = 200
-N_EPOCHS = 4
-NUM_CLASSES = 5
+# DATASET = 'yelp_full'
+# MAX_LEN = 200
+# N_EPOCHS = 4
+# NUM_CLASSES = 5
 
 # DATASET = 'ng20'
 # MAX_LEN = 200
 # N_EPOCHS = 100
 # NUM_CLASSES = 20
 
-BATCH_SIZE = 8
+BATCH_SIZE = 32
 LR = 1e-3
 MIN_FREQ = 64
 EMBEDDING_DIM = 100
@@ -60,10 +62,13 @@ SORT_BATCHES = False
 
 print('Dataset ' + DATASET + ' loaded.')
 
+rem = stop_words.STOP_WORDS.union({'.', ',', '"', ':', ';', '-'})
+
+
 # device = torch.device('cpu')
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN, tokenize=lambda x: x.split(),
+TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN, tokenize=lambda x: [i for i in x.split() if i not in rem],
              # include_lengths=True,
              batch_first=True, pad_first=PAD_FIRST, truncate_first=TRUNCATE_FIRST)
 
@@ -157,152 +162,194 @@ def get_emb():
 
 
 # %%
-# train_list = list(train_data_loader)
-# all_train_text = torch.cat([x[0] for x in train_list], 0)
-# del train_list
-#
-#
-# def random_train_sample(n):
-#     return all_train_text[np.random.randint(0, len(all_train_text), n)]
+train_list = list(train_data_loader)
+all_train_text = torch.cat([x[0] for x in train_list], 0)
+del train_list
+
+
+def random_train_sample(n):
+    return all_train_text[np.random.randint(0, len(all_train_text), n)]
 
 
 # %%
 
-# def sentence_emb_avg(xx, mask):
-#     len_s = (mask ^ 1).long().sum(1, keepdim=True).float()
-#     y_s = xx.sum(1) / len_s
-#     return y_s
+def sentence_emb_avg(xx, mask):
+    return xx.max(1)[0]
+    len_s = (mask ^ 1).long().sum(1, keepdim=True).float()
+    y_s = xx.sum(1) / len_s
+    return y_s
 
 
-# class Aspect(nn.Module):
-#     def __init__(self, emb_dim, asp_dim, inf):
-#         super().__init__()
-#         self.emb = get_emb()
-#         self.asp_dim = asp_dim
-#         self.emb_dim = emb_dim
-#         self.inf = inf
-#         # self.M = nn.Parameter(torch.randn(emb_dim, emb_dim))
-#         self.S = nn.Parameter(torch.randn(emb_dim))
-#         self.W = nn.Linear(emb_dim, asp_dim)
-#         self.T = nn.Parameter(torch.randn(asp_dim, emb_dim))  #
-#
-#         self.reset_params()
-#
-#     def reset_params(self):
-#         bound = 1 / math.sqrt(self.emb_dim)
-#         # init.uniform_(self.M, -bound, bound)
-#         init.uniform_(self.S, -bound, bound)
-#
-#         X = self.emb.weight.detach().cpu().numpy()
-#         kc = KMeans(n_jobs=8, n_clusters=self.asp_dim)
-#         kc_fit = kc.fit(X)
-#         centroids = kc_fit.cluster_centers_
-#         self.T = nn.Parameter(torch.FloatTensor(centroids))
-#
-#     def encode(self, xx, mask):
-#         """
-#
-#         :param xx: BSE
-#         :param mask: BS
-#         :return: BT
-#         """
-#
-#         # y_s = sentence_emb_avg(xx, mask)
-#
-#         z_s = self.weighted_avg(xx, mask)
-#
-#         p_t = F.relu(self.W(z_s))
-#
-#
-#         return p_t, z_s
-#
-#     def weighted_avg(self, xx, mask):
-#         # d_i = torch.einsum('bse,e->bs', [xx, self.S])
-#         # d_i.masked_fill_(mask, -INF)
-#         # a_i = F.softmax(d_i, -1)
-#         # z_s = torch.einsum('bse,bs->be', [xx, a_i])
-#         # return z_s
-#         len_s = (mask ^ 1).long().sum(1, keepdim=True).float()
-#         y_s = xx.sum(1) / len_s
-#         return y_s
-#
-#
-#     def decode(self, p_t):
-#         r_s = p_t @ self.T
-#         return r_s
-#
-#     def forward(self, x):
-#         mask = x == PAD
-#         x = self.emb(x)
-#         p_t, z_s = self.encode(x, mask)
-#         r_s = self.decode(p_t)
-#         return p_t, z_s, r_s
-#
-#
-# class Classifier(nn.Module):
-#
-#     def __init__(self, aspect_dim):
-#         super().__init__()
-#         self.aspect_dim = aspect_dim
-#         self.final = nn.Sequential(
-#             nn.ReLU(),
-#             nn.Linear(aspect_dim, NUM_CLASSES)
-#         )
-#
-#     def forward(self, p_t):
-#         return self.final(p_t)
-#
-#
-# class Model(nn.Module):
-#
-#     def __init__(self, aspects):
-#         super().__init__()
-#         self.aspect = Aspect(EMBEDDING_DIM, aspects, INF)
-#         self.classifier = Classifier(aspects)
-#
-#     def forward(self, x):
-#         p_t, z_s, r_s = self.aspect(x)
-#         out = self.classifier(p_t)
-#         return out, r_s, z_s
-#
-#
-# def margin_loss(reconstruction, representation, negatives=None):
-#     """
-#     :param reconstruction: BE
-#     :param representation: BE
-#     :param negatives: BME
-#     :return: j: B
-#     """
-#
-#     if negatives is not None:
-#         m = negatives.shape[1]
-#         r_sim = torch.einsum('be,be->b', [reconstruction, representation]).repeat(m, 1)
-#         n_sim = torch.einsum('be,bme->mb', [reconstruction, negatives])
-#
-#         # r_sim_ = (reconstruction.norm(dim=-1) * representation).repeat(m, 1)
-#         # n_sim_ = torch.einsum('b,bm->mb', [reconstruction.nomr(dim=-1), negatives.norm(dim=-1)])
-#     else:
-#         r_sim = torch.einsum('be,be->b', [reconstruction, representation])
-#         n_sim = 0
-#
-#     j = F.relu(1 - r_sim + n_sim).sum()
-#
-#     if negatives is not None:
-#         j = j / m
-#
-#     return j
-#
-#
-# def reg_loss(t):
-#     """
-#
-#     :param t: ET
-#     :return: 1
-#     """
-#     t_dot_tt = (t @ t.t()) / (t.norm(dim=-1, keepdim=True) @ t.norm(dim=-1, keepdim=True).t())
-#     t_dot_tt = t_dot_tt - torch.eye(t_dot_tt.shape[0]).to(device)
-#     u = t_dot_tt.norm()
-#     return u
+class Aspect(nn.Module):
+    def __init__(self, emb_dim, asp_dim, inf):
+        super().__init__()
+        self.emb = get_emb()
+        self.asp_dim = asp_dim
+        self.emb_dim = emb_dim
+        self.inf = inf
+        # self.M = nn.Parameter(torch.randn(emb_dim, emb_dim))
+        self.S = nn.Parameter(torch.randn(emb_dim))
+        self.W = nn.Linear(emb_dim, asp_dim)
+        self.T = nn.Parameter(torch.randn(asp_dim, emb_dim))  #
+
+        self.reset_params()
+
+    def reset_params(self):
+        bound = 1 / math.sqrt(self.emb_dim)
+        # init.uniform_(self.M, -bound, bound)
+        init.uniform_(self.S, -bound, bound)
+
+        X = self.emb.weight.detach().cpu().numpy()
+        kc = KMeans(n_jobs=8, n_clusters=self.asp_dim)
+        kc_fit = kc.fit(X)
+        centroids = kc_fit.cluster_centers_
+        self.T = nn.Parameter(torch.FloatTensor(centroids))
+
+    def encode(self, xx, mask):
+        """
+
+        :param xx: BSE
+        :param mask: BS
+        :return: BT
+        """
+
+        y_s = sentence_emb_avg(xx, mask)
+
+        z_s, a_i = self.weighted_avg(xx, mask, y_s)
+
+        p_t = self.W(z_s).softmax(-1)  # BA
+
+        return p_t, z_s, a_i
+
+    def weighted_avg(self, xx, mask, y_s):
+        d_i = torch.einsum('bse,be->bs', [xx, y_s])
+        d_i.masked_fill_(mask, -INF)
+        a_i = F.softmax(d_i, -1)
+        z_s = torch.einsum('bse,bs->be', [xx, a_i])
+        return z_s, a_i
+        # len_s = (mask ^ 1).long().sum(1, keepdim=True).float()
+        # y_s = xx.sum(1) / len_s
+        # return y_s
+
+    def decode(self, p_t):
+        r_s = p_t @ self.T
+        return r_s
+
+    def forward(self, x):
+        mask = x == PAD
+        x = self.emb(x)
+        p_t, z_s, a_i = self.encode(x, mask)
+        r_s = self.decode(p_t)
+        return p_t, z_s, r_s, a_i
+
+
+class Classifier(nn.Module):
+
+    def __init__(self, aspect_dim):
+        super().__init__()
+        self.aspect_dim = aspect_dim
+        self.final = nn.Sequential(
+            nn.ReLU(),
+            nn.Linear(aspect_dim, NUM_CLASSES)
+        )
+
+    def forward(self, p_t):
+        return self.final(p_t)
+
+
+class AspectExtractor(nn.Module):
+
+    def __init__(self, aspects):
+        super().__init__()
+        self.aspect = Aspect(EMBEDDING_DIM, aspects, INF)
+        # self.classifier = Classifier(aspects)
+
+    def forward(self, x):
+        p_t, z_s, r_s, a_i = self.aspect(x)
+        # out = self.classifier(p_t)
+        return r_s, z_s, a_i
+
+
+def margin_loss(reconstruction, representation, negatives=None):
+    """
+    :param reconstruction: BE
+    :param representation: BE
+    :param negatives: BME
+    :return: j: B
+    """
+
+    if negatives is not None:
+        m = negatives.shape[1]
+        r_sim = torch.einsum('be,be->b', [reconstruction, representation]).repeat(m, 1)
+        n_sim = torch.einsum('be,bme->mb', [reconstruction, negatives])
+
+        # r_sim_ = (reconstruction.norm(dim=-1) * representation).repeat(m, 1)
+        # n_sim_ = torch.einsum('b,bm->mb', [reconstruction.nomr(dim=-1), negatives.norm(dim=-1)])
+    else:
+        r_sim = torch.einsum('be,be->b', [reconstruction, representation])
+        n_sim = 0
+
+    j = F.relu(1 - r_sim + n_sim).sum()
+
+    if negatives is not None:
+        j = j / m
+
+    return j
+
+
+def reg_loss(t):
+    """
+
+    :param t: ET
+    :return: 1
+    """
+    t_dot_tt = (t @ t.t()) / (t.norm(dim=-1, keepdim=True) @ t.norm(dim=-1, keepdim=True).t())
+    t_dot_tt = t_dot_tt - torch.eye(t_dot_tt.shape[0]).to(device)
+    u = t_dot_tt.norm()
+    return u
+
+
+# %%
+
+model = AspectExtractor(10)
+
+model = model.to(device)
+
+# cross_loss = nn.CrossEntropyLoss(reduction='sum')
+
+metrics_history_all = []
+
+optimizer = torch.optim.Adam(model.parameters())
+metrics_history = []
+progress_bar = tqdm(range(1, N_EPOCHS + 1))
+for i_epoch in progress_bar:
+    model.train()
+    loss_total = 0
+    accu_total = 0
+    total = 0
+    progress_bar = tqdm(train_data_loader)
+    # for i, (x, y) in enumerate(train_data_loader):
+    for x, y in progress_bar:
+        optimizer.zero_grad()
+        batch_size = y.size(0)
+        reconstruction, representation, attention = model(x)
+
+        negatives = random_train_sample(batch_size * 20)
+        with torch.no_grad():
+            negatives = sentence_emb_avg(model.aspect.emb(negatives), negatives == PAD).view(batch_size, 20, -1)  # BME
+
+
+
+        loss_1 = margin_loss(reconstruction, representation, negatives)
+        loss_2 = reg_loss(model.aspect.T)
+        loss = loss_1 + loss_2
+
+        loss.backward()
+        optimizer.step()
+
+        progress_bar.set_description("{:.3f} ACC: {:.3f}".format(loss_1.item(), loss_2.item()))
+
+
 
 
 # %%
@@ -354,6 +401,10 @@ class DeconvolutionDecoder(nn.Module):
         self.deconvs2 = nn.ConvTranspose1d(filter_size * 2, filter_size, kernel_size=filter_shape, stride=2)
         self.bn2 = nn.BatchNorm1d(filter_size)
         self.deconvs3 = nn.ConvTranspose1d(filter_size, EMBEDDING_DIM, kernel_size=filter_shape, stride=2)
+
+        voca_size = len(TEXT.vocab)
+        self.adaptive_softmax = nn.AdaptiveLogSoftmaxWithLoss(EMBEDDING_DIM, voca_size,
+                                                              [round(voca_size / 15), 3 * round(voca_size / 15)])
 
         # weight initialize for conv_transpose layer
         for m in self.modules():
@@ -490,25 +541,25 @@ for i_epoch in progress_bar:
 
 # %%
 
-baselines = dict()
-
-
-def model_name(model):
-    try:
-        a = model.name
-    except:
-        a = type(model).__name__
-    return a
-
-
-baselines[model_name(model)] = metrics_history
-
-metrics_history_all_t = [np.array(i).T for i in baselines.values()]
-model_names = list(baselines.keys())
-
-rows = [(n, np.round(v[1].max(), 3), np.round(v[3].max(), 3)) for n, v in zip(model_names, metrics_history_all_t)]
-rows = sorted(rows, key=lambda x: x[2])
-t = Texttable()
-t.add_rows(rows, header=False)
-t.header(('Model', 'Acc Train', 'Acc Test'))
-print(t.draw())
+# baselines = dict()
+#
+#
+# def model_name(model):
+#     try:
+#         a = model.name
+#     except:
+#         a = type(model).__name__
+#     return a
+#
+#
+# baselines[model_name(model)] = metrics_history
+#
+# metrics_history_all_t = [np.array(i).T for i in baselines.values()]
+# model_names = list(baselines.keys())
+#
+# rows = [(n, np.round(v[1].max(), 3), np.round(v[3].max(), 3)) for n, v in zip(model_names, metrics_history_all_t)]
+# rows = sorted(rows, key=lambda x: x[2])
+# t = Texttable()
+# t.add_rows(rows, header=False)
+# t.header(('Model', 'Acc Train', 'Acc Test'))
+# print(t.draw())

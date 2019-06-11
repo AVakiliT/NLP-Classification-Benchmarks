@@ -1,3 +1,4 @@
+import fairseq
 import math
 import os
 import pickle
@@ -280,7 +281,7 @@ class TextCNN(nn.Module):
     def __init__(self):
         super().__init__()
         N_FILTERS = 50
-        SIZES = [1, 3, 5]
+        SIZES = [3]
         self.emb = get_emb()
         self.cnn = nn.ModuleList([
             nn.Sequential(
@@ -295,6 +296,31 @@ class TextCNN(nn.Module):
     def forward(self, x, _, __):
         x = self.emb(x)
         x = x.unsqueeze(1)
+        xs = [l(x).squeeze() for l in self.cnn]
+        x = torch.cat(xs, 1)
+        return self.final(x).squeeze()
+
+
+class TextCNN1d(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        N_FILTERS = 50
+        SIZES = [3]
+        self.emb = get_emb()
+        self.cnn = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(EMBEDDING_DIM, N_FILTERS, i),
+                nn.ReLU(),
+                nn.MaxPool1d((MAX_LEN - i + 1))
+            )
+            for i in SIZES
+        ])
+        self.final = nn.Linear(N_FILTERS * len(SIZES), NUM_CLASSES)
+
+    def forward(self, x, _, __):
+        x = self.emb(x)
+        x = x.transpose(1, 2)
         xs = [l(x).squeeze() for l in self.cnn]
         x = torch.cat(xs, 1)
         return self.final(x).squeeze()
@@ -466,6 +492,7 @@ class SwemAvg(nn.Module):
         xx = xx / x_len.unsqueeze(1).float()
         xx = self.final(xx)
         return xx
+
 
 class Swem_T2Sm(nn.Module):
     def __init__(self):
@@ -861,6 +888,155 @@ class DiSAN(nn.Module):
         return self.final(s_s)  # BC
 
 
+class DeepConv(nn.Module):
+    def __init__(self, filter_size, filter_shape, latent_size):
+        super(DeepConv, self).__init__()
+        self.embed = get_emb()
+        self.convs1 = nn.Conv1d(EMBEDDING_DIM, filter_size, filter_shape, stride=2)
+        self.bn1 = nn.BatchNorm1d(filter_size)
+        self.convs2 = nn.Conv1d(filter_size, filter_size * 2, filter_shape, stride=2)
+        self.bn2 = nn.BatchNorm1d(filter_size * 2)
+
+        self.len_1 = (MAX_LEN - (filter_shape - 1)) // 2  # 28
+        self.len_2 = (self.len_1 - (filter_shape - 1)) // 2
+
+        self.convs3 = nn.Conv1d(filter_size * 2, latent_size, self.len_2, stride=1)
+
+        self.final = get_final(latent_size, latent_size // 2)
+
+        # weight initialize for conv layer
+        # for m in self.modules():
+        #     if isinstance(m, nn.Conv2d):
+        #         n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+        #         m.weight.data.normal_(0, math.sqrt(2. / n))
+
+    def forward(self, x, _, __):
+        x = self.embed(x)
+
+        # reshape for convolution layer
+        x = x.transpose(1, 2)
+
+        h1 = F.relu(self.bn1(self.convs1(x)))
+        h2 = F.relu(self.bn2(self.convs2(h1)))
+        h3 = F.relu(self.convs3(h2))
+
+        o = self.final(h3.squeeze(-1))
+        return o
+
+
+class PositionalEncoder(nn.Module):
+    def __init__(self, d_model, max_seq_len=80):
+        super().__init__()
+        self.d_model = d_model
+
+        # create constant 'pe' matrix with values dependant on
+        # pos and i
+        pe = torch.zeros(max_seq_len, d_model)
+        for pos in range(max_seq_len):
+            for i in range(0, d_model, 2):
+                pe[pos, i] = \
+                    math.sin(pos / (10000 ** ((2 * i) / d_model)))
+                pe[pos, i + 1] = \
+                    math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
+
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # make embeddings relatively larger
+        x = x * math.sqrt(self.d_model)
+        # add constant to embedding
+        seq_len = x.size(1)
+        x = x + self.pe[:, :seq_len]
+        return x
+
+
+class Transformer(nn.Module):
+    class MultiHeadAttention(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.l_q = nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM, bias=False)
+            self.l_k = nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM, bias=False)
+            self.l_v = nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM, bias=False)
+            self.norm = nn.LayerNorm((MAX_LEN, EMBEDDING_DIM))
+            self.ff = nn.Sequential(
+                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM),
+                nn.ReLU(),
+                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM)
+            )
+
+        def attention(self, q, k, v, mask2d):
+            q, k, v = self.l_q(q), self.l_k(k), self.l_v(v),
+            sims = ((q @ k.transpose(1, 2)) / math.sqrt(EMBEDDING_DIM))  # bmn
+            sims = sims.masked_fill(mask2d, -INF)
+            sims = sims.softmax(-1)
+            o = torch.einsum('bmn,bne->bme', [sims, v])
+            return o
+
+        def forward(self, xx, mask2d):
+            xx = self.norm(xx + self.attention(xx, xx, xx, mask2d))
+            # xx = self.norm(xx + self.att(xx, xx, xx)[0])
+            xx = self.norm(xx + self.ff(xx))
+            return xx
+
+    def __init__(self):
+        super().__init__()
+        self.emb = get_emb()
+        self.pe = PositionalEncoder(EMBEDDING_DIM, MAX_LEN)
+        self.att = Transformer.MultiHeadAttention()
+        # self.att = nn.MultiheadAttention(EMBEDDING_DIM, 1)
+
+        self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
+
+    def forward(self, x, x_len, __):
+        mask = x == PAD  # bm
+        mask2d = mask.unsqueeze(1) | mask.unsqueeze(2)
+        xx = self.emb(x)
+        xx = self.pe(xx)
+        xx = self.att(xx, mask2d)
+        xx = xx.sum(1)
+        xx = xx / x_len.unsqueeze(1).float()
+        xx = self.final(xx)
+        return xx
+
+
+class DynaConv(nn.Module):
+    class Block(nn.Module):
+
+        def __init__(self, k):
+            super().__init__()
+            self.dc1 = fairseq.modules.DynamicConv1dTBC(EMBEDDING_DIM, kernel_size=k, padding_l=k // 2, num_heads=10,
+                                                        weight_softmax=True)
+            self.l1 = nn.Linear(EMBEDDING_DIM, 2 * EMBEDDING_DIM)
+            self.l2 = nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM)
+            self.ff = nn.Sequential(
+                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM),
+                nn.ReLU(),
+                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM)
+            )
+            self.norm = nn.LayerNorm((EMBEDDING_DIM))
+
+        def forward(self, x):
+            x = self.norm(x + self.dc1(F.glu(self.l1(x))))
+            x = self.norm(x + self.ff(x))
+            return x
+
+    def __init__(self):
+        super().__init__()
+        self.emb = get_emb()
+        self.b1 = self.Block(30)
+        self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
+
+    def forward(self, x, _, __):
+        xx = self.emb(x)
+        xx = xx.transpose(0, 1).contiguous()
+        xx = self.b1(xx)
+        xx = xx.sum(0)
+        xx = xx / x_len.unsqueeze(1).float()
+        xx = self.final(xx)
+        return xx
+
+
 # %%
 # print('building graph')
 # A = load_graph()
@@ -880,12 +1056,13 @@ class DiSAN(nn.Module):
 # model = leam2()
 # model = leam()
 # model = DiSAN()
-model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
+# model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemMax(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemConcat();
 # N_EPOCHS = N_EPOCHS * 2
 # model = SwemHier()
 # model = TextCNN()
+# model = TextCNN1d()
 # model = TextCnnWithFusion()
 # model = RNN(nn.GRU, bidirectional=True, num_layers=1, bias=True); N_EPOCHS = N_EPOCHS * 2
 # model = GhettoRNN(nn.LSTM, bidirectional=False, num_layers=1); N_EPOCHS = N_EPOCHS * 2
@@ -895,7 +1072,9 @@ model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
 # model = RnnWithAdditiveSourceAttention()
 # model = LeamWithGraphEmbed()
 # model = Swem_T2Sm(); N_EPOCHS *= 2
-
+# model = DeepConv(EMBEDDING_DIM, 5, EMBEDDING_DIM * 2)
+model = DynaConv()
+# model = Transformer()
 
 # N_EPOCHS = 25
 
