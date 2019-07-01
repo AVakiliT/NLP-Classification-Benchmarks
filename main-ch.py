@@ -167,13 +167,11 @@ class Model(nn.Module):
 
         xx = self.emb(x)
 
-        # xx_new = []
-        # for word in xx.permute(1, 0, 3, 2):
-        #     a = torch.cat([n_gram(word).squeeze(-1) for n_gram in self.char_cnns], -1)
-        #     xx_new.append(a)
-        #
-        # xx = torch.stack(xx_new, 1)
-
+        # xx_words = []
+        # for word in xx.permute(1, 0, 2, 3):
+        #     a = self.char_rnn(word)[0][:,-1,:]
+        #     xx_words.append(a)
+        # xx = torch.stack(xx_words, 1)
 
         xx = self.char_rnn(xx.view(-1, MAX_WORD_LEN, EMBEDDING_DIM))[0][:, -1, :].view(x.shape[0], MAX_LEN, -1)
 

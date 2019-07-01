@@ -1123,22 +1123,23 @@ for i_epoch in progress_bar:
         accu_total += acc
         total += batch_size
 
-    model.eval()
-    loss_total_test = 0
-    accu_total_test = 0
-    total_test = 0
-    for (x, x_len), y in test_data_loader:
-        mask = x != PAD
-        prediction = model(x, x_len, mask)
-        loss = criterion(prediction, y.long())
+    with torch.no_grad():
+        model.eval()
+        loss_total_test = 0
+        accu_total_test = 0
+        total_test = 0
+        for (x, x_len), y in test_data_loader:
+            mask = x != PAD
+            prediction = model(x, x_len, mask)
+            loss = criterion(prediction, y.long())
 
-        with torch.no_grad():
-            acc = (torch.argmax(prediction, 1).long() == y.long()).sum().item()
+            with torch.no_grad():
+                acc = (torch.argmax(prediction, 1).long() == y.long()).sum().item()
 
-        batch_size = y.size(0)
-        loss_total_test += loss.item()
-        accu_total_test += acc
-        total_test += batch_size
+            batch_size = y.size(0)
+            loss_total_test += loss.item()
+            accu_total_test += acc
+            total_test += batch_size
 
     metrics = (
         loss_total / total,
