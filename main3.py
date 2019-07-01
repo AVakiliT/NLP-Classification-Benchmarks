@@ -19,6 +19,16 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from torchtext.data import Field, TabularDataset, BucketIterator
 from tqdm import tqdm
 
+
+#%%
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--epochs', default=3, type=int)
+args = parser.parse_known_args()
+
+
+
+#%%
 SEED = 1
 
 torch.random.manual_seed(SEED)
@@ -37,15 +47,15 @@ print('Reading Dataset...')
 # N_EPOCHS = 25
 # NUM_CLASSES = 50
 
-# DATASET = 'yelp_full'
-# MAX_LEN = 200
-# N_EPOCHS = 4
-# NUM_CLASSES = 5
-
-DATASET = 'ng20'
+DATASET = 'yelp_full'
 MAX_LEN = 200
-N_EPOCHS = 18
-NUM_CLASSES = 20
+N_EPOCHS = 4
+NUM_CLASSES = 5
+#
+# DATASET = 'ng20'
+# MAX_LEN = 200
+# N_EPOCHS = 18
+# NUM_CLASSES = 20
 
 BATCH_SIZE = 32
 LR = 1e-3
@@ -57,6 +67,7 @@ HIDDEN_DIM = 100
 PAD_FIRST = True
 TRUNCATE_FIRST = False
 SORT_BATCHES = False
+EMB_REQ_GRAD = True
 
 print('Dataset ' + DATASET + ' loaded.')
 
@@ -225,7 +236,9 @@ embedding_weights.to(device)
 
 
 def get_emb():
-    return nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=PAD, _weight=embedding_weights.clone())
+    emb = nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=PAD, _weight=embedding_weights.clone())
+    emb.weight.requires_grad = EMB_REQ_GRAD
+    return emb
 
 
 # %%
@@ -1056,7 +1069,7 @@ class DynaConv(nn.Module):
 # model = leam2()
 # model = leam()
 # model = DiSAN()
-# model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
+model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemMax(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemConcat();
 # N_EPOCHS = N_EPOCHS * 2
@@ -1073,7 +1086,7 @@ class DynaConv(nn.Module):
 # model = LeamWithGraphEmbed()
 # model = Swem_T2Sm(); N_EPOCHS *= 2
 # model = DeepConv(EMBEDDING_DIM, 5, EMBEDDING_DIM * 2)
-model = DynaConv()
+# model = DynaConv()
 # model = Transformer()
 
 # N_EPOCHS = 25
