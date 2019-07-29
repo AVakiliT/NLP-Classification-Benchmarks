@@ -39,20 +39,20 @@ print('Reading Dataset...')
 # N_EPOCHS = 25
 # NUM_CLASSES = 50
 
-DATASET = 'yelp_full'
-MAX_LEN = 200
-N_EPOCHS = 4
-NUM_CLASSES = 5
-
-# DATASET = 'ng20'
+# DATASET = 'yelp_full'
 # MAX_LEN = 200
-# N_EPOCHS = 10
-# NUM_CLASSES = 20
+# N_EPOCHS = 4
+# NUM_CLASSES = 5
+
+DATASET = 'ng20'
+MAX_LEN = 200
+N_EPOCHS = 10
+NUM_CLASSES = 20
 
 BATCH_SIZE = 32
 LR = 1e-3
 MIN_FREQ = 8
-EMBEDDING_DIM = 100
+EMBEDDING_DIM = 300
 EPSILON = 1e-13
 INF = 1e13
 HIDDEN_DIM = 100
@@ -137,7 +137,8 @@ test_data_loader = TrainIterWrap(test_iter)
 
 # %%
 print('Reading Embeddings...')
-w2v = gensim.models.KeyedVectors.load_word2vec_format('/home/amir/IIS/Datasets/embeddings/glove.6B.100d.txt.w2vformat',
+w2v = gensim.models.KeyedVectors.load_word2vec_format('/home/amir/IIS/Datasets/embeddings/glove.6B.'+str(EMBEDDING_DIM)
+                                                      + 'd.txt.w2vformat',
                                                       binary=True)
 
 embedding_weights = torch.zeros(len(TEXT.vocab), EMBEDDING_DIM)
@@ -181,7 +182,7 @@ def sentence_emb_avg(xx, mask):
 
 
 class Aspect(nn.Module):
-    def __init__(self, emb_dim, asp_dim, inf):
+    def __init__(self, emb_dim, asp_dim):
         super().__init__()
         self.emb = get_emb()
         self.asp_dim = asp_dim
@@ -327,7 +328,7 @@ def reg_loss(t):
 
 # %%
 
-model = AspectExtractor(5)
+model = AspectExtractor(20)
 
 model = model.to(device)
 
@@ -360,8 +361,8 @@ for i_epoch in progress_bar:
         # loss_1 = torch.zeros(1).to(device)
         loss_2 = reg_loss(model.aspect.T)
         # loss_2 = torch.zeros(1).to(device)
-        loss_3 = c_loss(out, y)
-        # loss_3 = torch.zeros(1).to(device)
+        # loss_3 = c_loss(out, y)
+        loss_3 = torch.zeros(1).to(device)
 
         loss = loss_1 + loss_2 + loss_3
 
