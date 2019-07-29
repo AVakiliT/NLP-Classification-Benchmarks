@@ -52,7 +52,7 @@ NUM_CLASSES = 20
 BATCH_SIZE = 32
 LR = 1e-3
 MIN_FREQ = 8
-EMBEDDING_DIM = 300
+EMBEDDING_DIM = 100
 EPSILON = 1e-13
 INF = 1e13
 HIDDEN_DIM = 100
@@ -137,8 +137,7 @@ test_data_loader = TrainIterWrap(test_iter)
 
 # %%
 print('Reading Embeddings...')
-w2v = gensim.models.KeyedVectors.load_word2vec_format('/home/amir/IIS/Datasets/embeddings/glove.6B.'+str(EMBEDDING_DIM)
-                                                      + 'd.txt.w2vformat',
+w2v = gensim.models.KeyedVectors.load_word2vec_format('/home/amir/IIS/Datasets/embeddings/glove.6B.100d.txt.w2vformat',
                                                       binary=True)
 
 embedding_weights = torch.zeros(len(TEXT.vocab), EMBEDDING_DIM)
@@ -182,7 +181,7 @@ def sentence_emb_avg(xx, mask):
 
 
 class Aspect(nn.Module):
-    def __init__(self, emb_dim, asp_dim):
+    def __init__(self, emb_dim, asp_dim, inf):
         super().__init__()
         self.emb = get_emb()
         self.asp_dim = asp_dim
