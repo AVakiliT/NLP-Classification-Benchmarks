@@ -3,6 +3,7 @@ import os
 import pickle
 import random
 from collections import defaultdict, Counter
+from itertools import chain, combinations
 
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -18,6 +19,7 @@ from texttable import Texttable
 from torch import nn
 from torch.nn import functional as F, Parameter, init
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+from torch.utils.data import Dataset, DataLoader
 from torchtext.data import Field, TabularDataset, BucketIterator
 from tqdm import tqdm
 
@@ -51,7 +53,7 @@ NUM_CLASSES = 20
 
 BATCH_SIZE = 32
 LR = 1e-3
-MIN_FREQ = 8
+MIN_FREQ = 4
 EMBEDDING_DIM = 300
 EPSILON = 1e-13
 INF = 1e13
@@ -60,7 +62,7 @@ PAD_FIRST = True
 TRUNCATE_FIRST = False
 SORT_BATCHES = False
 
-print('Dataset ' + DATASET + ' loaded.')
+# print('Dataset ' + DATASET + ' loaded.')
 
 # rem = stop_words.STOP_WORDS.union({'.', ',', '"', ':', ';', '-'})
 rem = {}
@@ -68,73 +70,139 @@ rem = {}
 # device = torch.device('cpu')
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN,
-             tokenize=lambda x: [i for i in x.split() if i not in rem],
-             # include_lengths=True,
-             batch_first=True, pad_first=PAD_FIRST, truncate_first=TRUNCATE_FIRST)
-
-LABEL = Field(sequential=False, use_vocab=False, batch_first=True)
-
-columns = [('text', TEXT),
-           ('label', LABEL)]
-
-train = TabularDataset(
-    path=DATASET + '/train_clean.csv',
-    format='csv',
-    fields=columns,
-    skip_header=True
-)
-
-test = TabularDataset(
-    path=DATASET + '/test_clean.csv',
-    format='csv',
-    fields=columns,
-    skip_header=True
-)
-
-TEXT.build_vocab(train, min_freq=MIN_FREQ)
-
-PAD = 1
 # %%
-train_iter = BucketIterator(
-    train,
-    BATCH_SIZE,
-    device=device,
-    repeat=False,
-    shuffle=True,
-    sort=SORT_BATCHES,
-    sort_within_batch=True,
-    sort_key=lambda x: len(x.text),
-)
 
-test_iter = BucketIterator(
-    test,
-    BATCH_SIZE,
-    device=device,
-    repeat=False,
-    shuffle=False,
-    sort=True,
-    sort_within_batch=True,
-    sort_key=lambda x: len(x.text),
-)
+tokenize = lambda x: x.split()
+UNK = 0
+PAD = 1
 
 
-class TrainIterWrap:
+def read_train(fname):
+    df = pd.read_csv(fname, sep=',')
+    texts_counter = Counter(chain.from_iterable(map(tokenize, df.text)))
+    unk_count = 0
+    for w in list(texts_counter.keys()):
+        f = texts_counter[w]
+        if f < MIN_FREQ:
+            unk_count += f
+            texts_counter.pop(w)
+    words_set = set(texts_counter.keys())
+    itos = ['<UNK>', '<PAD>'] + list(words_set)
+    stoi = {v: i for i, v in enumerate(itos)}
+    texts_idx = df.text.apply(lambda x: ([stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
+    labels = df.label
+    return stoi, itos, texts_idx, labels
 
-    def __init__(self, iterator) -> None:
+
+def read_eval(fname, stoi):
+    df = pd.read_csv(fname, sep=',')
+    texts_idx = df.text.apply(lambda x: ([stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
+    labels = df.label
+    return texts_idx, labels
+
+
+class ClassificationDataset(Dataset):
+
+    def __init__(self, texts_idx, labels) -> None:
         super().__init__()
-        self.iterator = iterator
+        self.texts = texts_idx
+        self.labels = labels
 
-    def __iter__(self):
-        for batch in self.iterator:
-            yield batch.text, batch.label
+    def __getitem__(self, index: int):
+        return self.texts[index], self.labels[index]
 
-    def __len__(self):
-        return len(self.iterator)
+    def __len__(self) -> int:
+        return self.labels.__len__()
 
 
-train_data_loader = TrainIterWrap(train_iter)
-test_data_loader = TrainIterWrap(test_iter)
+stoi, itos, train_text_idx, train_labels = read_train(DATASET + '/train_clean.csv')
+train_dataset = ClassificationDataset(train_text_idx, train_labels)
+test_dataset = ClassificationDataset(*read_eval(DATASET + '/test_clean.csv', stoi))
+
+
+def collate(batch):
+    # m = max([len(i[0]) for i in batch])
+    m = MAX_LEN
+    texts = torch.LongTensor([[1] * (m - len(item[0])) + item[0] for item in batch])
+    labels = torch.LongTensor([item[1] for item in batch])
+    return [texts, labels]
+
+
+train_data_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=collate)
+test_data_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, collate_fn=collate)
+
+
+VOCAB_LEN = len(itos)
+# %%
+
+
+# TEXT = Field(sequential=True, use_vocab=True, fix_length=MAX_LEN,
+#              tokenize=lambda x: [i for i in x.split() if i not in rem],
+#              # include_lengths=True,
+#              batch_first=True, pad_first=PAD_FIRST, truncate_first=TRUNCATE_FIRST)
+#
+# LABEL = Field(sequential=False, use_vocab=False, batch_first=True)
+#
+# columns = [('text', TEXT),
+#            ('label', LABEL)]
+#
+# train = TabularDataset(
+#     path=DATASET + '/train_clean.csv',
+#     format='csv',
+#     fields=columns,
+#     skip_header=True
+# )
+#
+# test = TabularDataset(
+#     path=DATASET + '/test_clean.csv',
+#     format='csv',
+#     fields=columns,
+#     skip_header=True
+# )
+#
+# TEXT.build_vocab(train, min_freq=MIN_FREQ)
+#
+# PAD = 1
+# # %%
+# train_iter = BucketIterator(
+#     train,
+#     BATCH_SIZE,
+#     device=device,
+#     repeat=False,
+#     shuffle=True,
+#     sort=SORT_BATCHES,
+#     sort_within_batch=True,
+#     sort_key=lambda x: len(x.text),
+# )
+#
+# test_iter = BucketIterator(
+#     test,
+#     BATCH_SIZE,
+#     device=device,
+#     repeat=False,
+#     shuffle=False,
+#     sort=True,
+#     sort_within_batch=True,
+#     sort_key=lambda x: len(x.text),
+# )
+#
+#
+# class TrainIterWrap:
+#
+#     def __init__(self, iterator) -> None:
+#         super().__init__()
+#         self.iterator = iterator
+#
+#     def __iter__(self):
+#         for batch in self.iterator:
+#             yield batch.text, batch.label
+#
+#     def __len__(self):
+#         return len(self.iterator)
+#
+#
+# train_data_loader = TrainIterWrap(train_iter)
+# test_data_loader = TrainIterWrap(test_iter)
 
 # %%
 print('Reading Embeddings...')
@@ -143,11 +211,11 @@ w2v = gensim.models.KeyedVectors.load_word2vec_format(
     + 'd.txt.w2vformat',
     binary=True)
 
-embedding_weights = torch.zeros(len(TEXT.vocab), EMBEDDING_DIM)
+embedding_weights = torch.zeros(VOCAB_LEN, EMBEDDING_DIM)
 nn.init.normal_(embedding_weights)
 
 unmatch = []
-for i, word in enumerate(TEXT.vocab.itos):
+for i, word in enumerate(itos):
     if word in w2v and i != PAD:
         embedding_weights[i] = torch.Tensor(w2v[word])
     else:
@@ -155,13 +223,13 @@ for i, word in enumerate(TEXT.vocab.itos):
         if i == PAD:
             embedding_weights[i] = torch.zeros(EMBEDDING_DIM)
 
-print(len(unmatch) * 100 / len(TEXT.vocab.itos), '% of embeddings didn\'t match')
+print(len(unmatch) * 100 / VOCAB_LEN, '% of embeddings didn\'t match')
 
 embedding_weights.to(device)
 
 
 def get_emb():
-    return nn.Embedding(len(TEXT.vocab), EMBEDDING_DIM, padding_idx=PAD, _weight=embedding_weights.clone())
+    return nn.Embedding(VOCAB_LEN, EMBEDDING_DIM, padding_idx=PAD, _weight=embedding_weights.clone())
 
 
 # %%
@@ -198,6 +266,8 @@ class Aspect(nn.Module):
 
         self.fcg1 = nn.Linear(asp_dim, asp_dim)
         self.fcg2 = nn.Linear(asp_dim, asp_dim)
+        self.fcg3 = nn.Linear(asp_dim, asp_dim)
+        self.fcg4 = nn.Linear(asp_dim, asp_dim)
 
         self.T = nn.Parameter(torch.randn(asp_dim, emb_dim))  #
         # self.conv = nn.Conv1d(asp_dim, asp_dim, kernel_size=51, stride=1, padding=25)
@@ -225,24 +295,16 @@ class Aspect(nn.Module):
     def generate(self, h):
         g1 = torch.tanh(self.fcg1(h))
         g1 = torch.tanh(self.fcg2(g1))
-        # g1 = torch.tanh(self.fcg3(g1))
-        # g1 = torch.tanh(self.fcg4(g1))
-        # g1 = g1.add(h)
-        return g1
+        g1 = torch.tanh(self.fcg3(g1))
+        g1 = torch.tanh(self.fcg4(g1))
+        g1 = g1.add(h)
+        return g1.softmax(-1)
 
     def encode(self, sentence_weighted_average):
-        """
-
-        :param xx: BSE
-        :param mask: BS
-        :return: BT
-        """
-
         p_t_ = self.fc1(sentence_weighted_average)  # BA
         mu = self.fc21(p_t_)  # BA
         logvar = self.fc22(p_t_)  # BA
 
-        # p_t = p_t_.softmax(-1)
 
         return mu, logvar
 
@@ -286,107 +348,8 @@ class Aspect(nn.Module):
         return recons, mu, logvar, z, sentence_weighted_average
 
 
-class Aspect(nn.Module):
-    def __init__(self, emb_dim=EMBEDDING_DIM, hidden_dim=100, asp_dim=50):
-        super().__init__()
-        self.emb = get_emb()
-        self.asp_dim = asp_dim
-        self.emb_dim = emb_dim
-        # self.inf = inf
-        # self.M = nn.Parameter(torch.randn(emb_dim, emb_dim))
-        # self.Source = nn.Parameter(torch.randn(emb_dim))
-        self.fc1 = nn.Linear(emb_dim, hidden_dim)
-        self.fc21 = nn.Linear(hidden_dim, asp_dim)
-        self.fc22 = nn.Linear(hidden_dim, asp_dim)
 
-        self.fcg1 = nn.Linear(asp_dim, asp_dim)
-        self.fcg2 = nn.Linear(asp_dim, asp_dim)
 
-        self.T = nn.Parameter(torch.randn(asp_dim, emb_dim))  #
-        # self.conv = nn.Conv1d(asp_dim, asp_dim, kernel_size=51, stride=1, padding=25)
-        self.reset_params()
-
-    def reset_params(self):
-        # bound = 1 / math.sqrt(self.emb_dim)
-        # init.uniform_(self.M, -bound, bound)
-        # init.uniform_(self.Source, -bound, bound)
-
-        X = self.emb.weight.detach().cpu().numpy()
-        kc = KMeans(n_jobs=8, n_clusters=self.asp_dim)
-        kc_fit = kc.fit(X)
-        centroids = kc_fit.cluster_centers_
-        self.T = nn.Parameter(torch.FloatTensor(centroids))
-
-    def reparameterize(self, mu, logvar):
-        if self.training:
-            std = torch.exp(0.5 * logvar)
-            eps = torch.randn_like(std)
-            return eps.mul(std).add_(mu)
-        else:
-            return mu
-
-    def generate(self, h):
-        g1 = torch.tanh(self.fcg1(h))
-        g1 = torch.tanh(self.fcg2(g1))
-        # g1 = torch.tanh(self.fcg3(g1))
-        # g1 = torch.tanh(self.fcg4(g1))
-        # g1 = g1.add(h)
-        return g1
-
-    def encode(self, sentence_weighted_average):
-        """
-
-        :param xx: BSE
-        :param mask: BS
-        :return: BT
-        """
-
-        p_t_ = self.fc1(sentence_weighted_average)  # BA
-        mu = self.fc21(p_t_)  # BA
-        logvar = self.fc22(p_t_)  # BA
-
-        # p_t = p_t_.softmax(-1)
-
-        return mu, logvar
-
-    def weighted_avg(self, xx, mask, y_s=None):
-        d_i = torch.einsum('bse,be->bs', [xx, y_s])
-        d_i.masked_fill_(mask, -INF)
-        a_i = F.softmax(d_i, -1)
-        z_s = torch.einsum('bse,bs->be', [xx, a_i])
-        return z_s, a_i
-
-        ####
-
-        # g = torch.einsum('ae,bse->bas', [self.T, xx])
-        # g_hat = torch.einsum('a,bs->bas', [self.T.norm(dim=-1), xx.norm(dim=-1)])
-        # g_hat[g_hat == 0] = EPSILON
-        # g = g / g_hat
-        # u = F.relu(self.conv(g))
-        # m = u.max(1)[0]  # BS
-        # a_i = m.masked_fill(mask, -INF)
-        # a_i = F.softmax(a_i, -1)
-        # z_s = torch.einsum('bse,bs->be', [xx, a_i])
-        # return z_s, a_i
-
-    def decode(self, z):
-        r_s = z @ self.T
-        return r_s
-
-    def forward(self, x):
-        mask = x == PAD
-        xx = self.emb(x)
-
-        sentence_average = sentence_emb_avg(xx, mask)
-
-        sentence_weighted_average, a_i = self.weighted_avg(xx, mask, sentence_average)
-
-        mu, logvar = self.encode(sentence_weighted_average)
-        z = self.reparameterize(mu, logvar)
-        g = self.generate(z)
-        recons = self.decode(g)
-
-        return recons, mu, logvar, z, sentence_weighted_average
 
 # class Classifier(nn.Module):
 #
@@ -458,6 +421,7 @@ def vae_loss(recon_x, x, mu, logvar):
 
     return MSE + KLD, MSE, KLD
 
+
 def reg_loss(t):
     """
 
@@ -470,9 +434,7 @@ def reg_loss(t):
     return u
 
 
-# %%
-
-model = AspectExtractor(asp_dim=100)
+model = AspectExtractor(asp_dim=20)
 
 model = model.to(device)
 
@@ -493,6 +455,8 @@ for i_epoch in progress_bar:
     total = 0
     # progress_bar = tqdm(train_data_loader)
     for i, (x, y) in enumerate(train_data_loader):
+        x = x.to(device)
+        y = y.to(device)
         # for x, y in progress_bar:
         optimizer.zero_grad()
         batch_size = y.size(0)
@@ -512,7 +476,7 @@ for i_epoch in progress_bar:
         # loss_3 = c_loss(out, y)
         loss_3 = torch.zeros(1).to(device)
 
-        loss = loss_0 + loss_1 + loss_2 + loss_3
+        loss = loss_0 + loss_1 + 10 * loss_2 + loss_3
 
         loss.backward()
         optimizer.step()
@@ -558,28 +522,52 @@ for i_epoch in progress_bar:
 
     metrics_history.append(metrics)
 
-# print(np.array(metrics_history).max(0)[-2:])
 
 
-#%%
-def print_topic_words(n_top_words=10):
+
+
+def topic_words(n_top_words=10):
     sims = (model.aspect.T.detach() @ model.aspect.emb.weight.t().detach()) / (
-                model.aspect.T.detach().norm(dim=-1, keepdim=True).detach() @ model.aspect.emb.weight.detach().norm(dim=-1, keepdim=True).t())
+            model.aspect.T.detach().norm(dim=-1, keepdim=True).detach() @ model.aspect.emb.weight.detach().norm(dim=-1,
+                                                                                                                keepdim=True).t())
     sims[torch.isnan(sims)] = -1
 
-    sims = sims.cpu().numpy()
-    for k, beta_k in enumerate(sims):
-        topic_words = [TEXT.vocab.itos[w_id] for w_id in np.argsort(beta_k)[:-n_top_words - 1:-1]]
+    sims = sims.cpu()
+    top_words = sims.sort(dim=-1, descending=True)[1][:,:n_top_words]
+    for k, beta_k in enumerate(top_words):
+        topic_words = [itos[w_id.item()] for w_id in beta_k]
         print('Topic {}: {}'.format(k, ' '.join(topic_words)))
+    return top_words
 
-print_topic_words(15)
+
+top_words = topic_words(15)
 
 
+# %%
+
+inverse_index = defaultdict(list)
+for word in tqdm(range(VOCAB_LEN)):
+    for did, doc in enumerate(train_dataset.texts):
+        if word in doc:
+            inverse_index[word].append(did)
 
 #%%
 
+
 def co_document_frequency(w1, w2):
-    return 0
+    return len(set(inverse_index[w1]).intersection(set(inverse_index[w2])))
+
 
 def document_frequency(w1):
-    return 0
+    return len(inverse_index[w1])
+
+
+all_scores = []
+for topic in tqdm(top_words.numpy()):
+    score = 0
+    for w1, w2 in combinations(topic, 2):
+        score += np.log((co_document_frequency(w1, w2) + 1)/(document_frequency(w1) + document_frequency(w1) + 1))
+    all_scores.append(score)
+all_scores = np.array(all_scores)
+print(all_scores)
+print(all_scores.mean())
