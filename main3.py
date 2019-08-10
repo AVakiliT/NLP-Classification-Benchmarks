@@ -47,15 +47,15 @@ print('Reading Dataset...')
 # N_EPOCHS = 25
 # NUM_CLASSES = 50
 
-DATASET = 'yelp_full'
-MAX_LEN = 200
-N_EPOCHS = 4
-NUM_CLASSES = 5
-#
-# DATASET = 'ng20'
+# DATASET = 'yelp_full'
 # MAX_LEN = 200
-# N_EPOCHS = 18
-# NUM_CLASSES = 20
+# N_EPOCHS = 4
+# NUM_CLASSES = 5
+#
+DATASET = 'ng20'
+MAX_LEN = 200
+N_EPOCHS = 18
+NUM_CLASSES = 20
 
 BATCH_SIZE = 32
 LR = 1e-3
@@ -1067,9 +1067,9 @@ class DynaConv(nn.Module):
 # model = CNN()
 # model = TextCnnWithFusionAndContext()
 # model = leam2()
-# model = leam()
+model = leam()
 # model = DiSAN()
-model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
+# model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemMax(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemConcat();
 # N_EPOCHS = N_EPOCHS * 2
