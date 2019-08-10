@@ -278,8 +278,8 @@ class VAE(nn.Module):
     def __init__(self, latent_size=50, hidden_size=EMBEDDING_DIM):
         super().__init__()
         self.emb = get_emb()
-        self.encoder = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
-                               bidirectional=True, batch_first=True, num_layers=1)
+        self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
+                                   bidirectional=True, batch_first=True, num_layers=1)
         self.context2mu = nn.Linear(hidden_size * 2, latent_size)
         self.context2logvar = nn.Linear(hidden_size * 2, latent_size)
 
@@ -306,27 +306,56 @@ class VAE(nn.Module):
         return z, kld
 
     def forward(self, encoder_input, decoder_input):
+
         xx1 = self.emb(encoder_input)
-        xx2 = self.emb(decoder_input)
-        states, (final_state, cell) = self.encoder(xx1)
+        states, _ = self.encoder_rnn(xx1)
         z, kld = self.reparametrize(states[:, -1, :])  # BZ
 
-        xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, decoder_input.shape[1], 1)], -1)
+        xx2 = self.emb(decoder_input)
+        logits = self.decode(xx2, z)
 
+        return logits, kld
+
+    def decode(self, xx2, z):
+        xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
         xx = xx.transpose(1, 2)
-
         for conv in self.convs:
             xx = conv(xx)
 
             xx = xx[:, :, :(xx.shape[2] - conv.padding[0])].contiguous()
 
             xx = xx.relu()
-
         xx = xx.transpose(1, 2)  # BSH
-
         xx = self.output2vocab(xx)  # BSV
+        return xx
 
-        return xx, kld
+    def sample(self, zz=None, seq_len=MAX_LEN):
+        with torch.no_grad():
+            if zz is None:
+                zz = torch.randn(50)
+
+            z = torch.Tensor(zz).to(device).unsqueeze(0)
+
+            decoder_input = torch.LongTensor([SOS]).unsqueeze(0)
+
+            sentence = ''
+
+            for i in range(seq_len):
+                xx2 = self.emb(decoder_input.to(device))
+                logits = self.decode(xx2, z)
+                logits = logits[0,-1].softmax(0)
+                next_word_id = np.random.choice(range(VOCAB_LEN), p=logits.detach().cpu().numpy())
+
+                if next_word_id == EOS:
+                    break
+
+                sentence += ' ' + itos[next_word_id]
+
+                decoder_input = torch.cat([decoder_input, torch.LongTensor([next_word_id]).unsqueeze(0)], 1)
+
+        return sentence.strip()
+
+
 
 
 def margin_loss(reconstruction, sentence_weighted_average, negatives=None):
