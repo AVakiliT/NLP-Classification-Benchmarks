@@ -6,6 +6,7 @@ from collections import defaultdict, Counter
 from itertools import chain, combinations
 
 import pandas as pd
+from colorama import Fore
 from matplotlib import pyplot as plt
 import seaborn as sns
 import gensim
@@ -25,7 +26,6 @@ from tqdm import tqdm
 
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-
 
 SEED = 1
 
@@ -63,6 +63,7 @@ EPSILON = 1e-13
 INF = 1e13
 HIDDEN_DIM = 100
 PAD_FIRST = False
+FREEZE_EMB = False
 # TRUNCATE_FIRST = False
 # SORT_BATCHES = False
 
@@ -250,7 +251,7 @@ embedding_weights.to(device)
 
 def get_emb():
     emb = nn.Embedding(VOCAB_LEN, EMBEDDING_DIM, padding_idx=PAD, _weight=embedding_weights.clone())
-    emb.requires_grad = False
+    emb.requires_grad = not FREEZE_EMB
     return emb
 
 
@@ -343,7 +344,7 @@ class VAE(nn.Module):
             for i in range(seq_len):
                 xx2 = self.emb(decoder_input.to(device))
                 logits = self.decode(xx2, z)
-                logits = logits[0,-1].softmax(0)
+                logits = logits[0, -1].softmax(0)
                 next_word_id = np.random.choice(range(VOCAB_LEN), p=logits.detach().cpu().numpy())
 
                 if next_word_id == EOS:
@@ -354,8 +355,6 @@ class VAE(nn.Module):
                 decoder_input = torch.cat([decoder_input, torch.LongTensor([next_word_id]).unsqueeze(0)], 1)
 
         return sentence.strip()
-
-
 
 
 def margin_loss(reconstruction, sentence_weighted_average, negatives=None):
@@ -425,6 +424,11 @@ def reg_loss(t):
 #     else:
 #         raise NotImplementedError
 
+def perplexity(logits, target):
+    with torch.no_grad():
+        ppl = logits.log_softmax(-1).gather(2, target.unsqueeze(2)).neg().mean(1).exp().squeeze(-1)
+        return ppl
+
 # %%
 
 model = VAE()
@@ -444,6 +448,7 @@ for i_epoch in range(1, N_EPOCHS):
     rec_loss_total = 0
     kld_loss_total = 0
     loss_total = 0
+    ppl_total = 0
     total = 0
     progress_bar = tqdm(train_data_loader)
     for i, (x, x_sos, x_eos, y) in enumerate(progress_bar):
@@ -455,43 +460,75 @@ for i_epoch in range(1, N_EPOCHS):
 
         optimizer.zero_grad()
 
-        logits, kld =model(x, x_sos)
+        logits, kld = model(x, x_sos)
 
         cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), x_eos.view(-1), reduction='sum') / x_eos.shape[1]
+
+        kld *= 10 ** np.log(i_epoch)
 
         loss = cross_entropy + kld
         loss.backward()
         optimizer.step()
 
+        ppl = perplexity(logits, x_eos).sum()
+
         rec_loss_total += cross_entropy.item()
         kld_loss_total += kld.item()
         loss_total += loss.item()
+        ppl_total += ppl
         total += batch_size
 
         metrics = (
             rec_loss_total / total,
             kld_loss_total / total,
             loss_total / total,
+            ppl_total / total
         )
 
-        progress_bar.set_description('[ EPOCH : {:02d} ][ REC : {:3f} KLD : {:3f} LSS : {:3f} ]'.format(i_epoch, *metrics))
+        progress_bar.set_description(
+            Fore.WHITE + '[ EPOCH : {:02d} ][ NLL : {:.3f} KLD : {:.3f} LSS : {:.3f} PPL : {:.3f}]'.format(i_epoch, *metrics))
 
-    # model.eval()
+    with torch.no_grad():
+        model.eval()
+        rec_loss_total_test = 0
+        kld_loss_total_test = 0
+        loss_total_test = 0
+        ppl_total_test = 0
+        total_test = 0
+        progress_bar = tqdm(test_data_loader)
+        for i, (x, x_sos, x_eos, y) in enumerate(progress_bar):
+            x = x.to(device)  # encoder_inpuy
+            x_sos = x_sos.to(device)  # decoder input
+            x_eos = x_eos.to(device)  # decoder output
+            y = y.to(device)
+            batch_size = y.size(0)
 
-    # accu_total_test = 0
-    # total_test = 0
-    # progress_bar = tqdm(test_data_loader)
-    # for i, (x, y) in enumerate(test_data_loader):
-    #     # for x, y in progress_bar:
-    #
-    #     batch_size = y.size(0)
-    #     reconstruction, representation, attention, probs, out = model(x)
-    #
-    #     with torch.no_grad():
-    #         accu = (out.argmax(1) == y).float().sum().item()
-    #
-    #     accu_total_test += accu
-    #     total_test += batch_size
+            logits, kld = model(x, x_sos)
+
+            cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), x_eos.view(-1), reduction='sum') / x_eos.shape[
+                1]
+
+            kld *= 10 ** np.log(i_epoch)
+
+            loss = cross_entropy + kld
+
+            ppl = perplexity(logits, x_eos).sum()
+
+            rec_loss_total_test += cross_entropy.item()
+            kld_loss_total_test += kld.item()
+            loss_total_test += loss.item()
+            ppl_total_test += ppl
+            total_test += batch_size
+
+            metrics = (
+                rec_loss_total_test / total_test,
+                kld_loss_total_test / total_test,
+                loss_total_test / total_test,
+                ppl_total_test / total_test
+            )
+
+            progress_bar.set_description(
+                Fore.YELLOW + '[ EPOCH : {:02d} ][ NLL : {:.3f} KLD : {:.3f} LSS : {:.3f} PPL : {:.3f}]'.format(i_epoch, *metrics))
     #
     # metrics = (
     #     loss_0_total / total,
@@ -507,6 +544,7 @@ for i_epoch in range(1, N_EPOCHS):
     # metrics_history.append(metrics)
 
 
+#%%
 def topic_words(n_top_words=10):
     sims = (model.aspect.T.detach() @ model.aspect.emb.weight.t().detach()) / (
             model.aspect.T.detach().norm(dim=-1, keepdim=True).detach() @ model.aspect.emb.weight.detach().norm(dim=-1,
