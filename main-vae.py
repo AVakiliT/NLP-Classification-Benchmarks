@@ -23,6 +23,10 @@ from torch.utils.data import Dataset, DataLoader
 from torchtext.data import Field, TabularDataset, BucketIterator
 from tqdm import tqdm
 
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+
 SEED = 1
 
 torch.random.manual_seed(SEED)
@@ -91,33 +95,40 @@ def read_train(fname):
     itos = ['<UNK>', '<PAD>', '<SOS>', '<EOS>'] + list(words_set)
     stoi = {v: i for i, v in enumerate(itos)}
     texts_idx = df.text.apply(lambda x: ([stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
+    texts_idx_sos = df.text.apply(lambda x: ([SOS] + [stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
+    texts_idx_eos = df.text.apply(lambda x: ([stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN] + [EOS]))
     labels = df.label
-    return stoi, itos, texts_idx, labels
+    return stoi, itos, texts_idx, texts_idx_sos, texts_idx_eos, labels
 
 
 def read_eval(fname, stoi):
     df = pd.read_csv(fname, sep=',')
     texts_idx = df.text.apply(lambda x: ([stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
+    texts_idx_sos = df.text.apply(lambda x: ([SOS] + [stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
+    texts_idx_eos = df.text.apply(lambda x: ([stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN] + [EOS]))
     labels = df.label
-    return texts_idx, labels
+    return texts_idx, texts_idx_sos, texts_idx_eos, labels
 
 
 class ClassificationDataset(Dataset):
 
-    def __init__(self, texts_idx, labels) -> None:
+    def __init__(self, texts_idx, texts_idx_sos, texts_idx_eos, labels) -> None:
         super().__init__()
+        self.texts_eos = texts_idx_eos
+        self.texts_sos = texts_idx_sos
         self.texts = texts_idx
         self.labels = labels
 
     def __getitem__(self, index: int):
-        return self.texts[index], self.labels[index]
+        return self.texts[index], self.texts_sos[index], self.texts_eos[index], self.labels[index]
 
     def __len__(self) -> int:
         return self.labels.__len__()
 
 
-stoi, itos, train_text_idx, train_labels = read_train(DATASET + '/train_clean.csv')
-train_dataset = ClassificationDataset(train_text_idx, train_labels)
+stoi, itos, train_text_idx, train_texts_idx_sos, train_texts_idx_eos, train_labels = read_train(
+    DATASET + '/train_clean.csv')
+train_dataset = ClassificationDataset(train_text_idx, train_texts_idx_sos, train_texts_idx_eos, train_labels)
 test_dataset = ClassificationDataset(*read_eval(DATASET + '/test_clean.csv', stoi))
 
 
@@ -132,8 +143,10 @@ def collate(batch):
     # m = max([len(i[0]) for i in batch])
     m = MAX_LEN
     texts = torch.LongTensor([pad(item[0], m) for item in batch])
-    labels = torch.LongTensor([item[1] for item in batch])
-    return [texts, labels]
+    texts_sos = torch.LongTensor([pad(item[1], m + 1) for item in batch])
+    texts_eos = torch.LongTensor([pad(item[2], m + 1) for item in batch])
+    labels = torch.LongTensor([item[3] for item in batch])
+    return texts, texts_sos, texts_eos, labels
 
 
 train_data_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=collate)
@@ -289,19 +302,19 @@ class VAE(nn.Module):
         eps = torch.randn_like(std)
         z = mu + eps * std
         kld = -0.5 * torch.sum(logvar - mu.pow(2) - logvar.exp() + 1, -1)
+        kld = kld.sum()
         return z, kld
 
-    def forward(self, x1, x2):
-        xx1 = self.emb(x1)
-        xx2 = self.emb(x2)
+    def forward(self, encoder_input, decoder_input):
+        xx1 = self.emb(encoder_input)
+        xx2 = self.emb(decoder_input)
         states, (final_state, cell) = self.encoder(xx1)
         z, kld = self.reparametrize(states[:, -1, :])  # BZ
 
-        decoder_input = torch.cat([xx2, z.unsqueeze(1).repeat(1, x2.shape[1], 1)], -1)
+        xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, decoder_input.shape[1], 1)], -1)
 
-        decoder_input = decoder_input.transpose(1, 2)
+        xx = xx.transpose(1, 2)
 
-        xx = decoder_input
         for conv in self.convs:
             xx = conv(xx)
 
@@ -371,7 +384,6 @@ def reg_loss(t):
     return u
 
 
-
 # def insert_sos(xx):
 #     if not PAD_FIRST:
 #         torch.cat([torch.ones(xx.shape[0], dtype=torch.long).mul(SOS).unsqueeze(1), x], 1)
@@ -396,51 +408,49 @@ metrics_history_all = []
 
 optimizer = torch.optim.Adam(model.parameters())
 metrics_history = []
-progress_bar = tqdm(range(1, N_EPOCHS + 1))
-for i_epoch in progress_bar:
+# progress_bar = tqdm(range(1, N_EPOCHS + 1))
+# for i_epoch in progress_bar:
+for i_epoch in range(1, N_EPOCHS):
     model.train()
-    loss_0_total = 0
-    loss_1_total = 0
-    loss_2_total = 0
-    loss_3_total = 0
-    accu_total = 0
+    rec_loss_total = 0
+    kld_loss_total = 0
+    loss_total = 0
     total = 0
-    # progress_bar = tqdm(train_data_loader)
-    for i, (x, y) in enumerate(train_data_loader):
-        x = x.to(device)
-        encoder_inpu =
-
+    progress_bar = tqdm(train_data_loader)
+    for i, (x, x_sos, x_eos, y) in enumerate(progress_bar):
+        x = x.to(device)  # encoder_inpuy
+        x_sos = x_sos.to(device)  # decoder input
+        x_eos = x_eos.to(device)  # decoder output
         y = y.to(device)
-        # for x, y in progress_bar:
-        optimizer.zero_grad()
         batch_size = y.size(0)
-        out, kld = model(x, x)
 
-        # negatives = random_train_sample(batch_size * 20)
-        # with torch.no_grad():
-        #     negatives = model.aspect.weighted_avg(model.aspect.emb(negatives), negatives == PAD)[0].view(batch_size, 20,
-        #                                                                                                  -1)  # BME
-        #
-        #
+        optimizer.zero_grad()
 
+        logits, kld =model(x, x_sos)
+
+        cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), x_eos.view(-1), reduction='sum') / x_eos.shape[1]
+
+        loss = cross_entropy + kld
         loss.backward()
         optimizer.step()
 
-        # with torch.no_grad():
-        #     accu = (out.argmax(1) == y).float().sum().item()
-        accu = 0
-
-        loss_0_total += loss_0.item()
-        loss_1_total += loss_1.item()
-        loss_2_total += loss_2.item()
-        loss_3_total += loss_3.item()
-        accu_total += accu
+        rec_loss_total += cross_entropy.item()
+        kld_loss_total += kld.item()
+        loss_total += loss.item()
         total += batch_size
 
-    model.eval()
+        metrics = (
+            rec_loss_total / total,
+            kld_loss_total / total,
+            loss_total / total,
+        )
 
-    accu_total_test = 0
-    total_test = 0
+        progress_bar.set_description('[ EPOCH : {:02d} ][ REC : {:3f} KLD : {:3f} LSS : {:3f} ]'.format(i_epoch, *metrics))
+
+    # model.eval()
+
+    # accu_total_test = 0
+    # total_test = 0
     # progress_bar = tqdm(test_data_loader)
     # for i, (x, y) in enumerate(test_data_loader):
     #     # for x, y in progress_bar:
@@ -454,18 +464,18 @@ for i_epoch in progress_bar:
     #     accu_total_test += accu
     #     total_test += batch_size
     #
-    metrics = (
-        loss_0_total / total,
-        loss_1_total / total,
-        loss_2_total / total,
-        loss_3_total / total,
-        # accu_total / total,
-        # accu_total_test / total_test,
-    )
+    # metrics = (
+    #     loss_0_total / total,
+    #     loss_1_total / total,
+    #     loss_2_total / total,
+    #     loss_3_total / total,
+    #     # accu_total / total,
+    #     # accu_total_test / total_test,
+    # )
 
-    progress_bar.set_description("{:.3f} {:.3f} {:.3f} {:.3f}".format(*metrics))
-
-    metrics_history.append(metrics)
+    # progress_bar.set_description("{:.3f} {:.3f} {:.3f} {:.3f}".format(*metrics))
+    #
+    # metrics_history.append(metrics)
 
 
 def topic_words(n_top_words=10):
