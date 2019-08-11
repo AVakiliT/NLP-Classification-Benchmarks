@@ -274,10 +274,73 @@ def sentence_emb_avg(xx, mask):
     return y_s
 
 
-class VAE(nn.Module):
+
+class LSTM_LM(nn.Module):
+    def __init__(self, latent_size=50, hidden_size=EMBEDDING_DIM):
+        super().__init__()
+        self.latent_size = latent_size
+        self.emb = get_emb()
+        self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
+                                   bidirectional=True, batch_first=True, num_layers=1)
+        self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM + latent_size, hidden_size=500,
+                                   batch_first=True, num_layers=1)
+
+        self.output2vocab = nn.Linear(500, VOCAB_LEN)
+        self.fc = nn.Linear(EMBEDDING_DIM * 2, latent_size)
+
+    def encode(self, xx1):
+        states, _ = self.encoder_rnn(xx1)
+        z = self.fc(states[:, -1, :]).relu()  # BZ
+        return 0, z
+
+    def decode(self, xx2, z):
+        xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+
+        xx, _ = self.decoder_rnn(xx)
+        xx = self.output2vocab(xx)  # BSV
+
+        return xx
+
+    def forward(self, encoder_input, decoder_input):
+        xx1 = self.emb(encoder_input)
+        kld, z = self.encode(xx1)
+
+        xx2 = self.emb(decoder_input)
+        logits = self.decode(xx2, z)
+
+        return logits, kld
+
+    def sample(self, zz=None, seq_len=MAX_LEN):
+        with torch.no_grad():
+            if zz is None:
+                zz = torch.randn(self.latent_size)
+
+            z = torch.Tensor(zz).to(device).unsqueeze(0)
+
+            decoder_input = torch.LongTensor([SOS]).unsqueeze(0)
+
+            sentence = ''
+
+            for i in range(seq_len):
+                xx2 = self.emb(decoder_input.to(device))
+                logits = self.decode(xx2, z)
+                logits = logits[0, -1].softmax(0)
+                next_word_id = np.random.choice(range(VOCAB_LEN), p=logits.detach().cpu().numpy())
+
+                if next_word_id == EOS:
+                    break
+
+                sentence += ' ' + itos[next_word_id]
+
+                decoder_input = torch.cat([decoder_input, torch.LongTensor([next_word_id]).unsqueeze(0)], 1)
+
+        return sentence.strip()
+
+class LSTM_VAE_CNN_AE(nn.Module):
 
     def __init__(self, latent_size=50, hidden_size=EMBEDDING_DIM):
         super().__init__()
+        self.latent_size = latent_size
         self.emb = get_emb()
         self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
                                    bidirectional=True, batch_first=True, num_layers=1)
@@ -302,6 +365,7 @@ class VAE(nn.Module):
         std = logvar.mul(.5).exp()
         eps = torch.randn_like(std)
         z = mu + eps * std
+        # kld = (logvar - mu.pow(2) - logvar.exp() + 1).sum(-1).mul(-0.5).sum()
         kld = -0.5 * torch.sum(logvar - mu.pow(2) - logvar.exp() + 1, -1)
         kld = kld.sum()
         return z, kld
@@ -309,13 +373,17 @@ class VAE(nn.Module):
     def forward(self, encoder_input, decoder_input):
 
         xx1 = self.emb(encoder_input)
-        states, _ = self.encoder_rnn(xx1)
-        z, kld = self.reparametrize(states[:, -1, :])  # BZ
+        kld, z = self.encode(xx1)
 
         xx2 = self.emb(decoder_input)
         logits = self.decode(xx2, z)
 
         return logits, kld
+
+    def encode(self, xx1):
+        states, _ = self.encoder_rnn(xx1)
+        z, kld = self.reparametrize(states[:, -1, :])  # BZ
+        return kld, z
 
     def decode(self, xx2, z):
         xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
@@ -333,7 +401,7 @@ class VAE(nn.Module):
     def sample(self, zz=None, seq_len=MAX_LEN):
         with torch.no_grad():
             if zz is None:
-                zz = torch.randn(50)
+                zz = torch.randn(self.latent_size)
 
             z = torch.Tensor(zz).to(device).unsqueeze(0)
 
@@ -355,6 +423,12 @@ class VAE(nn.Module):
                 decoder_input = torch.cat([decoder_input, torch.LongTensor([next_word_id]).unsqueeze(0)], 1)
 
         return sentence.strip()
+
+    def get_z(self, x):
+        with torch.no_grad():
+            x = self.emb(x)
+            z, _ = self.encode(x)
+            return z
 
 
 def margin_loss(reconstruction, sentence_weighted_average, negatives=None):
@@ -431,7 +505,8 @@ def perplexity(logits, target):
 
 # %%
 
-model = VAE()
+# model = LSTM_VAE_CNN_AE()
+model = LSTM_LM()
 
 model = model.to(device)
 
@@ -486,7 +561,7 @@ for i_epoch in range(1, N_EPOCHS):
         )
 
         progress_bar.set_description(
-            Fore.WHITE + '[ EPOCH : {:02d} ][ NLL : {:.3f} KLD : {:.3f} LSS : {:.3f} PPL : {:.3f}]'.format(i_epoch, *metrics))
+            Fore.WHITE + '[ EPOCH: {:02d} ][ NLL: {:.3f} KLD: {:.3f} LSS: {:.3f} PPL: {:.3f}]'.format(i_epoch, *metrics))
 
     with torch.no_grad():
         model.eval()
@@ -528,7 +603,7 @@ for i_epoch in range(1, N_EPOCHS):
             )
 
             progress_bar.set_description(
-                Fore.YELLOW + '[ EPOCH : {:02d} ][ NLL : {:.3f} KLD : {:.3f} LSS : {:.3f} PPL : {:.3f}]'.format(i_epoch, *metrics))
+                Fore.YELLOW + '[ EPOCH: {:02d} ][ NLL: {:.3f} KLD: {:.3f} LSS: {:.3f} PPL: {:.3f}]'.format(i_epoch, *metrics))
     #
     # metrics = (
     #     loss_0_total / total,
