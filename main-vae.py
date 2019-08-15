@@ -4,6 +4,7 @@ import pickle
 import random
 from collections import defaultdict, Counter
 from itertools import chain, combinations
+from typing import Any
 
 import pandas as pd
 from colorama import Fore
@@ -24,8 +25,8 @@ from torch.utils.data import Dataset, DataLoader
 from torchtext.data import Field, TabularDataset, BucketIterator
 from tqdm import tqdm
 
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
 
 SEED = 1
 
@@ -44,26 +45,27 @@ print('Reading Dataset...')
 # MAX_LEN = 800
 # N_EPOCHS = 25
 # NUM_CLASSES = 50
-
+#
 # DATASET = 'yelp_full'
 # MAX_LEN = 200
-# N_EPOCHS = 4
+# N_EPOCHS = 6
 # NUM_CLASSES = 5
 
 DATASET = 'ng20'
 MAX_LEN = 200
-N_EPOCHS = 10
+N_EPOCHS = 15
 NUM_CLASSES = 20
 
 BATCH_SIZE = 32
 LR = 1e-3
 MIN_FREQ = 4
-EMBEDDING_DIM = 300
+EMBEDDING_DIM = 100
 EPSILON = 1e-13
 INF = 1e13
 HIDDEN_DIM = 100
 PAD_FIRST = False
 FREEZE_EMB = False
+USE_EMBED=True
 # TRUNCATE_FIRST = False
 # SORT_BATCHES = False
 
@@ -226,32 +228,36 @@ VOCAB_LEN = len(itos)
 # test_data_loader = TrainIterWrap(test_iter)
 
 # %%
-print('Reading Embeddings...')
-w2v = gensim.models.KeyedVectors.load_word2vec_format(
-    '/home/amir/IIS/Datasets/embeddings/glove.6B.' + str(EMBEDDING_DIM)
-    + 'd.txt.w2vformat',
-    binary=True)
+if USE_EMBED:
+    print('Reading Embeddings...')
+    w2v = gensim.models.KeyedVectors.load_word2vec_format(
+        '/home/amir/IIS/Datasets/embeddings/glove.6B.' + str(EMBEDDING_DIM)
+        + 'd.txt.w2vformat',
+        binary=True)
 
-embedding_weights = torch.zeros(VOCAB_LEN, EMBEDDING_DIM)
-nn.init.normal_(embedding_weights)
+    embedding_weights = torch.zeros(VOCAB_LEN, EMBEDDING_DIM)
+    nn.init.normal_(embedding_weights)
 
-unmatch = []
-for i, word in enumerate(itos):
-    if word in w2v and i != PAD:
-        embedding_weights[i] = torch.Tensor(w2v[word])
-    else:
-        unmatch.append(word)
-        if i == PAD:
-            embedding_weights[i] = torch.zeros(EMBEDDING_DIM)
+    unmatch = []
+    for i, word in enumerate(itos):
+        if word in w2v and i != PAD:
+            embedding_weights[i] = torch.Tensor(w2v[word])
+        else:
+            unmatch.append(word)
+            if i == PAD:
+                embedding_weights[i] = torch.zeros(EMBEDDING_DIM)
 
-print(len(unmatch) * 100 / VOCAB_LEN, '% of embeddings didn\'t match')
+    print(len(unmatch) * 100 / VOCAB_LEN, '% of embeddings didn\'t match')
 
-embedding_weights.to(device)
+    embedding_weights.to(device)
 
 
 def get_emb():
-    emb = nn.Embedding(VOCAB_LEN, EMBEDDING_DIM, padding_idx=PAD, _weight=embedding_weights.clone())
-    emb.requires_grad = not FREEZE_EMB
+    if USE_EMBED:
+        emb = nn.Embedding(VOCAB_LEN, EMBEDDING_DIM, padding_idx=PAD, _weight=embedding_weights.clone())
+        emb.requires_grad = not FREEZE_EMB
+    else:
+        emb = nn.Embedding(VOCAB_LEN, EMBEDDING_DIM, padding_idx=PAD)
     return emb
 
 
@@ -274,27 +280,111 @@ def sentence_emb_avg(xx, mask):
     return y_s
 
 
+# class LSTM_LM(nn.Module):
+#     def __init__(self, latent_size=50, hidden_size=512):
+#         super().__init__()
+#         self.latent_size = latent_size
+#         self.emb = get_emb()
+#         self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
+#                                    bidirectional=True, batch_first=True, num_layers=1)
+#         self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM + latent_size, hidden_size=hidden_size * 2,
+#                                    batch_first=True, num_layers=1)
+#
+#         self.output2vocab = nn.Linear(hidden_size * 2, VOCAB_LEN)
+#         self.fc = nn.Linear(hidden_size * 2, latent_size)
+#
+#     def encode(self, xx1):
+#         states, _ = self.encoder_rnn(xx1)
+#         z = self.fc(states[:, -1, :]).relu()  # BZ
+#         return torch.zeros(1).to(device), z
+#
+#     def decode(self, xx2, z):
+#         xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+#
+#         xx, _ = self.decoder_rnn(xx)
+#         xx = self.output2vocab(xx)  # BSV
+#
+#         return xx
+#
+#     def forward(self, encoder_input, decoder_input):
+#         xx1 = self.emb(encoder_input)
+#         kld, z = self.encode(xx1)
+#
+#         xx2 = self.emb(decoder_input)
+#         logits = self.decode(xx2, z)
+#
+#         return logits, kld
 
-class LSTM_LM(nn.Module):
-    def __init__(self, latent_size=50, hidden_size=EMBEDDING_DIM):
+
+class LSTM_LM_Bowman(nn.Module):
+    def __init__(self, hidden_size=512):
+        super().__init__()
+        self.emb = get_emb()
+        self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
+                                   bidirectional=True, batch_first=True, num_layers=1)
+        self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size * 2,
+                                   batch_first=True, num_layers=1)
+
+        self.output2vocab = nn.Linear(hidden_size * 2, VOCAB_LEN)
+        self.fc = nn.Linear(hidden_size * 2, hidden_size * 2)
+
+    def encode(self, xx1):
+        states, _ = self.encoder_rnn(xx1)
+        z = self.fc(states[:, -1, :]).relu()  # BZ
+        return torch.zeros(1).to(device), z
+
+    def decode(self, xx2, z):
+        # xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+
+        xx, _ = self.decoder_rnn(xx2, z)
+        xx = self.output2vocab(xx)  # BSV
+
+        return xx
+
+    def forward(self, encoder_input, decoder_input):
+        xx1 = self.emb(encoder_input)
+        kld, z = self.encode(xx1)
+
+        xx2 = self.emb(decoder_input)
+        logits = self.decode(xx2, (z.unsqueeze(0), torch.zeros_like(z.unsqueeze(0))))
+
+        return logits, kld
+
+class LSTM_VAE(nn.Module):
+    def __init__(self, latent_size=50, hidden_size=512):
         super().__init__()
         self.latent_size = latent_size
         self.emb = get_emb()
         self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
                                    bidirectional=True, batch_first=True, num_layers=1)
-        self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM + latent_size, hidden_size=500,
+        self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM + latent_size, hidden_size=hidden_size * 2,
                                    batch_first=True, num_layers=1)
 
-        self.output2vocab = nn.Linear(500, VOCAB_LEN)
-        self.fc = nn.Linear(EMBEDDING_DIM * 2, latent_size)
+        self.output2vocab = nn.Linear(hidden_size * 2, VOCAB_LEN)
+        self.fc = nn.Linear(latent_size, latent_size)
+
+        self.context2mu = nn.Linear(hidden_size * 2, latent_size)
+        self.context2logvar = nn.Linear(hidden_size * 2, latent_size)
 
     def encode(self, xx1):
         states, _ = self.encoder_rnn(xx1)
-        z = self.fc(states[:, -1, :]).relu()  # BZ
-        return 0, z
+        z, kld = self.reparametrize(states[:, -1, :])  # BZ
+        return kld, z
+
+    def reparametrize(self, context):
+        mu = self.context2mu(context)
+        logvar = self.context2logvar(context)
+        std = logvar.mul(.5).exp()
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        # kld = (logvar - mu.pow(2) - logvar.exp() + 1).sum(-1).mul(-0.5).sum()
+        kld = -0.5 * torch.sum(logvar - mu.pow(2) - logvar.exp() + 1, -1)
+        kld = kld.sum()
+        return z, kld
 
     def decode(self, xx2, z):
-        xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+        z_ = self.fc(z).relu()
+        xx = torch.cat([xx2, z_.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
 
         xx, _ = self.decoder_rnn(xx)
         xx = self.output2vocab(xx)  # BSV
@@ -336,28 +426,47 @@ class LSTM_LM(nn.Module):
 
         return sentence.strip()
 
+
 class LSTM_VAE_CNN_AE(nn.Module):
 
-    def __init__(self, latent_size=50, hidden_size=EMBEDDING_DIM):
+    def __init__(self, latent_size=32, hidden_size=512, num_dilation_layers=5):
         super().__init__()
+
         self.latent_size = latent_size
+        channel_external_size = hidden_size * 2
+        channel_internal_size = hidden_size
+
         self.emb = get_emb()
         self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
                                    bidirectional=True, batch_first=True, num_layers=1)
         self.context2mu = nn.Linear(hidden_size * 2, latent_size)
         self.context2logvar = nn.Linear(hidden_size * 2, latent_size)
 
+        self.latent2channel = nn.Linear(latent_size, channel_external_size - EMBEDDING_DIM)
+
         conv_params = [
-            (latent_size + EMBEDDING_DIM, 400, 3, 1, 2, 1),
-            (400, 450, 3, 1, 4, 2),
-            (450, 500, 3, 1, 8, 4),
+            [
+                (channel_external_size, channel_internal_size, 1),
+                (channel_internal_size, channel_internal_size, 3, 1, 2 ** (i + 1), 2 ** i),
+                (channel_internal_size, channel_external_size, 1)
+            ] for i in range(num_dilation_layers)
         ]
 
         self.convs = nn.ModuleList([
-            nn.Conv1d(*params) for params in conv_params
+            nn.Sequential(
+                nn.Conv1d(*p1),
+                nn.ReLU(),
+                nn.Dropout(.1),
+                nn.Conv1d(*p2),
+                nn.ReLU(),
+                nn.Dropout(.1),
+                nn.Conv1d(*p3),
+                nn.ReLU(),
+                nn.Dropout(.1),
+            ) for p1, p2, p3 in conv_params
         ])
 
-        self.output2vocab = nn.Linear(500, VOCAB_LEN)
+        self.output2vocab = nn.Linear(channel_external_size, VOCAB_LEN)
 
     def reparametrize(self, context):
         mu = self.context2mu(context)
@@ -386,14 +495,19 @@ class LSTM_VAE_CNN_AE(nn.Module):
         return kld, z
 
     def decode(self, xx2, z):
-        xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+        z_ = self.latent2channel(z).relu()
+        xx = torch.cat([xx2, z_.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
         xx = xx.transpose(1, 2)
+
+        res = xx
         for conv in self.convs:
             xx = conv(xx)
 
-            xx = xx[:, :, :(xx.shape[2] - conv.padding[0])].contiguous()
+            xx = xx[:, :, :(xx.shape[2] - conv[3].padding[0])].contiguous()  # shift by 1
 
-            xx = xx.relu()
+            xx = xx.add(res).relu()
+            res = xx
+
         xx = xx.transpose(1, 2)  # BSH
         xx = self.output2vocab(xx)  # BSV
         return xx
@@ -431,59 +545,121 @@ class LSTM_VAE_CNN_AE(nn.Module):
             return z
 
 
-def margin_loss(reconstruction, sentence_weighted_average, negatives=None):
-    """
-    :param reconstruction: BE
-    :param sentence_weighted_average: BE
-    :param negatives: BME
-    :return: j: B
-    """
+class ConvDeconv(nn.Module):
 
-    if negatives is not None:
-        m = negatives.shape[1]
-        # r_sim = torch.einsum('be,be->b', [reconstruction, representation]).repeat(m, 1)
-        # n_sim = torch.einsum('be,bme->mb', [reconstruction, negatives])
+    def __init__(self) -> None:
+        super().__init__()
+        self.emb = get_emb()
+        self.encoders = nn.ModuleList([
+            nn.Conv1d(EMBEDDING_DIM, 300, 5, 2),
+            nn.Conv1d(300, 600, 5, 2),
+            nn.Conv1d(600, 500, 5, 2),
+        ])
+        self.decoders = nn.ModuleList([
+            nn.ConvTranspose1d(500, 600, 5, 2),
+            nn.ConvTranspose1d(600, 300, 5, 2),
+            nn.ConvTranspose1d(300, EMBEDDING_DIM, 5, 2),
+        ])
+        self.context2mu = nn.Linear(2000, 2000)
+        self.context2logvar = nn.Linear(2000, 2000)
 
-        r_sim_ = F.cosine_similarity(reconstruction, sentence_weighted_average, dim=-1).repeat(m, 1)
-        n_sim_ = F.cosine_similarity(reconstruction.unsqueeze(1).repeat(1, m, 1), negatives, dim=-1).t()
+    def encoder(self, xx):
+        shapes = [xx.shape]
+        for conv in self.encoders:
+            xx = conv(xx).relu()
+            shapes.append(xx.shape)
+        return xx, shapes[:-1]
 
-        # r_sim_ = (reconstruction.norm(dim=-1) * representation).repeat(m, 1)
-        # n_sim_ = torch.einsum('b,bm->mb', [reconstruction.nomr(dim=-1), negatives.norm(dim=-1)])
-    else:
-        r_sim = torch.einsum('be,be->b', [reconstruction, sentence_weighted_average])
-        n_sim = 0
+    def decoder(self, z, shapes):
+        xx = z
+        for deconv, shape in zip(self.decoders, shapes):
+            xx = deconv(xx, output_size=shape).relu()
+        return xx
 
-    # j = F.relu(1 - r_sim + n_sim).sum()
-    j = F.relu(1 - r_sim_ + n_sim_).sum()
+    def reparametrize(self, context):
+        mu = self.context2mu(context)
+        logvar = self.context2logvar(context)
+        std = logvar.mul(.5).exp()
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        # kld = (logvar - mu.pow(2) - logvar.exp() + 1).sum(-1).mul(-0.5).sum()
+        kld = -0.5 * torch.sum(logvar - mu.pow(2) - logvar.exp() + 1, -1)
+        kld = kld.sum()
+        return z, kld
 
-    if negatives is not None:
-        j = j / m
+    def forward(self, x, _):
+        xx = self.emb(x)
+        xx, shapes = self.encoder(xx.transpose(1, 2))
+        xx = xx.transpose(1, 2)
 
-    return j
+        b, s, _ = xx.shape
+        xx = xx.reshape(b, -1)
+        z, kld = self.reparametrize(xx)
+        z = z.reshape(b, s, -1)
+
+        xx = self.decoder(z.transpose(1, 2), shapes[::-1]).transpose(1, 2)
+
+        sims = torch.einsum('bse,ve->bsv', [xx, self.emb.weight])
+        sims_ = torch.einsum('bs,v->bsv', [xx.norm(dim=-1), self.emb.weight.norm(dim=-1)])
+        sims_[sims_ == 0] = INF
+        sims = sims / sims_
+
+        return sims, kld
 
 
-def vae_loss(recon_x, x, mu, logvar):
-    MSE = F.mse_loss(recon_x, x, reduction='sum')
-
-    # see Appendix B from VAE paper:
-    # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-    # https://arxiv.org/abs/1312.6114
-    # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-    return MSE + KLD, MSE, KLD
-
-
-def reg_loss(t):
-    """
-
-    :param t: ET
-    :return: 1
-    """
-    t_dot_tt = (t @ t.t()) / (t.norm(dim=-1, keepdim=True) @ t.norm(dim=-1, keepdim=True).t())
-    t_dot_tt = t_dot_tt - torch.eye(t_dot_tt.shape[0]).to(device)
-    u = t_dot_tt.norm()
-    return u
+# def margin_loss(reconstruction, sentence_weighted_average, negatives=None):
+#     """
+#     :param reconstruction: BE
+#     :param sentence_weighted_average: BE
+#     :param negatives: BME
+#     :return: j: B
+#     """
+#
+#     if negatives is not None:
+#         m = negatives.shape[1]
+#         # r_sim = torch.einsum('be,be->b', [reconstruction, representation]).repeat(m, 1)
+#         # n_sim = torch.einsum('be,bme->mb', [reconstruction, negatives])
+#
+#         r_sim_ = F.cosine_similarity(reconstruction, sentence_weighted_average, dim=-1).repeat(m, 1)
+#         n_sim_ = F.cosine_similarity(reconstruction.unsqueeze(1).repeat(1, m, 1), negatives, dim=-1).t()
+#
+#         # r_sim_ = (reconstruction.norm(dim=-1) * representation).repeat(m, 1)
+#         # n_sim_ = torch.einsum('b,bm->mb', [reconstruction.nomr(dim=-1), negatives.norm(dim=-1)])
+#     else:
+#         r_sim = torch.einsum('be,be->b', [reconstruction, sentence_weighted_average])
+#         n_sim = 0
+#
+#     # j = F.relu(1 - r_sim + n_sim).sum()
+#     j = F.relu(1 - r_sim_ + n_sim_).sum()
+#
+#     if negatives is not None:
+#         j = j / m
+#
+#     return j
+#
+#
+# def vae_loss(recon_x, x, mu, logvar):
+#     MSE = F.mse_loss(recon_x, x, reduction='sum')
+#
+#     # see Appendix B from VAE paper:
+#     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
+#     # https://arxiv.org/abs/1312.6114
+#     # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+#     KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+#
+#     return MSE + KLD, MSE, KLD
+#
+#
+# def reg_loss(t):
+#     """
+#
+#     :param t: ET
+#     :return: 1
+#     """
+#     t_dot_tt = (t @ t.t()) / (t.norm(dim=-1, keepdim=True) @ t.norm(dim=-1, keepdim=True).t())
+#     t_dot_tt = t_dot_tt - torch.eye(t_dot_tt.shape[0]).to(device)
+#     u = t_dot_tt.norm()
+#     return u
 
 
 # def insert_sos(xx):
@@ -503,10 +679,14 @@ def perplexity(logits, target):
         ppl = logits.log_softmax(-1).gather(2, target.unsqueeze(2)).neg().mean(1).exp().squeeze(-1)
         return ppl
 
+
 # %%
 
-# model = LSTM_VAE_CNN_AE()
-model = LSTM_LM()
+model = LSTM_VAE_CNN_AE(latent_size=32, hidden_size=128)
+# model = LSTM_LM(latent_size=32, hidden_size=128)
+# model = LSTM_VAE(latent_size=32, hidden_size=128)
+# model = ConvDeconv()
+# model = LSTM_LM_Bowman(hidden_size=128)
 
 model = model.to(device)
 
@@ -514,7 +694,7 @@ c_loss = nn.CrossEntropyLoss(reduction='sum')
 
 metrics_history_all = []
 
-optimizer = torch.optim.Adam(model.parameters())
+optimizer = torch.optim.Adam(model.parameters(), betas=(0.5, .999))
 metrics_history = []
 # progress_bar = tqdm(range(1, N_EPOCHS + 1))
 # for i_epoch in progress_bar:
@@ -533,24 +713,24 @@ for i_epoch in range(1, N_EPOCHS):
         y = y.to(device)
         batch_size = y.size(0)
 
+        target = x_eos
+
         optimizer.zero_grad()
 
         logits, kld = model(x, x_sos)
 
-        cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), x_eos.view(-1), reduction='sum') / x_eos.shape[1]
+        cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), target.view(-1), reduction='sum')
 
-        kld *= 10 ** np.log(i_epoch)
-
-        loss = cross_entropy + kld
+        loss = cross_entropy + kld * (.01 + (.99 * ((total / len(train_dataset)) / 10 + (i_epoch / min(N_EPOCHS, 10)))))
         loss.backward()
         optimizer.step()
 
-        ppl = perplexity(logits, x_eos).sum()
+        ppl = perplexity(logits, target).sum()
 
         rec_loss_total += cross_entropy.item()
         kld_loss_total += kld.item()
         loss_total += loss.item()
-        ppl_total += ppl
+        ppl_total += ppl.item()
         total += batch_size
 
         metrics = (
@@ -561,13 +741,14 @@ for i_epoch in range(1, N_EPOCHS):
         )
 
         progress_bar.set_description(
-            Fore.WHITE + '[ EPOCH: {:02d} ][ NLL: {:.3f} KLD: {:.3f} LSS: {:.3f} PPL: {:.3f}]'.format(i_epoch, *metrics))
+            Fore.RESET + '[ EPOCH: {:02d} ][ TRN NLL: {:.3f} KLD: {:.3f} LSS: {:.3f} PPL: {:.3f}]'.format(i_epoch,
+                                                                                                          *metrics))
 
     with torch.no_grad():
         model.eval()
         rec_loss_total_test = 0
         kld_loss_total_test = 0
-        loss_total_test = 0
+        # loss_total_test = 0
         ppl_total_test = 0
         total_test = 0
         progress_bar = tqdm(test_data_loader)
@@ -578,32 +759,29 @@ for i_epoch in range(1, N_EPOCHS):
             y = y.to(device)
             batch_size = y.size(0)
 
+            target = x_eos
+
             logits, kld = model(x, x_sos)
 
-            cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), x_eos.view(-1), reduction='sum') / x_eos.shape[
-                1]
+            cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), target.view(-1), reduction='sum')
 
-            kld *= 10 ** np.log(i_epoch)
-
-            loss = cross_entropy + kld
-
-            ppl = perplexity(logits, x_eos).sum()
+            ppl = perplexity(logits, target).sum()
 
             rec_loss_total_test += cross_entropy.item()
             kld_loss_total_test += kld.item()
-            loss_total_test += loss.item()
-            ppl_total_test += ppl
+            # loss_total_test += loss.item()
+            ppl_total_test += ppl.item()
             total_test += batch_size
 
             metrics = (
                 rec_loss_total_test / total_test,
                 kld_loss_total_test / total_test,
-                loss_total_test / total_test,
+                # loss_total_test / total_test,
                 ppl_total_test / total_test
             )
 
             progress_bar.set_description(
-                Fore.YELLOW + '[ EPOCH: {:02d} ][ NLL: {:.3f} KLD: {:.3f} LSS: {:.3f} PPL: {:.3f}]'.format(i_epoch, *metrics))
+                Fore.YELLOW + '[ EPOCH: {:02d} ][ TST NLL: {:.3f} KLD: {:.3f} PPL: {:.3f}]'.format(i_epoch, *metrics))
     #
     # metrics = (
     #     loss_0_total / total,
@@ -618,50 +796,49 @@ for i_epoch in range(1, N_EPOCHS):
     #
     # metrics_history.append(metrics)
 
-
-#%%
-def topic_words(n_top_words=10):
-    sims = (model.aspect.T.detach() @ model.aspect.emb.weight.t().detach()) / (
-            model.aspect.T.detach().norm(dim=-1, keepdim=True).detach() @ model.aspect.emb.weight.detach().norm(dim=-1,
-                                                                                                                keepdim=True).t())
-    sims[torch.isnan(sims)] = -1
-
-    sims = sims.cpu()
-    top_words = sims.sort(dim=-1, descending=True)[1][:, :n_top_words]
-    for k, beta_k in enumerate(top_words):
-        topic_words = [itos[w_id.item()] for w_id in beta_k]
-        print('Topic {}: {}'.format(k, ' '.join(topic_words)))
-    return top_words
-
-
-top_words = topic_words(15)
-
 # %%
-
-inverse_index = defaultdict(list)
-for word in tqdm(range(VOCAB_LEN)):
-    for did, doc in enumerate(train_dataset.texts):
-        if word in doc:
-            inverse_index[word].append(did)
-
-
-# %%
-
-
-def co_document_frequency(w1, w2):
-    return len(set(inverse_index[w1]).intersection(set(inverse_index[w2])))
-
-
-def document_frequency(w1):
-    return len(inverse_index[w1])
-
-
-all_scores = []
-for topic in tqdm(top_words.numpy()):
-    score = 0
-    for w1, w2 in combinations(topic, 2):
-        score += np.log((co_document_frequency(w1, w2) + 1) / (document_frequency(w1) + document_frequency(w1) + 1))
-    all_scores.append(score)
-all_scores = np.array(all_scores)
-print(all_scores)
-print(all_scores.mean())
+# def topic_words(n_top_words=10):
+#     sims = (model.aspect.T.detach() @ model.aspect.emb.weight.t().detach()) / (
+#             model.aspect.T.detach().norm(dim=-1, keepdim=True).detach() @ model.aspect.emb.weight.detach().norm(dim=-1,
+#                                                                                                                 keepdim=True).t())
+#     sims[torch.isnan(sims)] = -1
+#
+#     sims = sims.cpu()
+#     top_words = sims.sort(dim=-1, descending=True)[1][:, :n_top_words]
+#     for k, beta_k in enumerate(top_words):
+#         topic_words = [itos[w_id.item()] for w_id in beta_k]
+#         print('Topic {}: {}'.format(k, ' '.join(topic_words)))
+#     return top_words
+#
+#
+# top_words = topic_words(15)
+#
+# # %%
+#
+# inverse_index = defaultdict(list)
+# for word in tqdm(range(VOCAB_LEN)):
+#     for did, doc in enumerate(train_dataset.texts):
+#         if word in doc:
+#             inverse_index[word].append(did)
+#
+#
+# # %%
+#
+#
+# def co_document_frequency(w1, w2):
+#     return len(set(inverse_index[w1]).intersection(set(inverse_index[w2])))
+#
+#
+# def document_frequency(w1):
+#     return len(inverse_index[w1])
+#
+#
+# all_scores = []
+# for topic in tqdm(top_words.numpy()):
+#     score = 0
+#     for w1, w2 in combinations(topic, 2):
+#         score += np.log((co_document_frequency(w1, w2) + 1) / (document_frequency(w1) + document_frequency(w1) + 1))
+#     all_scores.append(score)
+# all_scores = np.array(all_scores)
+# print(all_scores)
+# print(all_scores.mean())

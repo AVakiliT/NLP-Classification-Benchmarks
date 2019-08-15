@@ -1,4 +1,4 @@
-import fairseq
+# import fairseq
 import math
 import os
 import pickle
@@ -294,7 +294,7 @@ class TextCNN(nn.Module):
     def __init__(self):
         super().__init__()
         N_FILTERS = 50
-        SIZES = [3]
+        SIZES = [1, 3, 5]
         self.emb = get_emb()
         self.cnn = nn.ModuleList([
             nn.Sequential(
@@ -319,7 +319,7 @@ class TextCNN1d(nn.Module):
     def __init__(self):
         super().__init__()
         N_FILTERS = 50
-        SIZES = [3]
+        SIZES = [1,3,5]
         self.emb = get_emb()
         self.cnn = nn.ModuleList([
             nn.Sequential(
@@ -338,6 +338,21 @@ class TextCNN1d(nn.Module):
         x = torch.cat(xs, 1)
         return self.final(x).squeeze()
 
+
+class PytorchTransformer(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.emb = get_emb()
+        self.transformer = nn.Transformer(EMBEDDING_DIM, EMBEDDING_DIM)
+        self.final = nn.Linear(EMBEDDING_DIM, NUM_CLASSES)
+
+    def forward(self, x, _, __):
+        x = self.emb(x)
+        x = self.transformer(x, x)
+        xs = [l(x).squeeze() for l in self.cnn]
+        x = torch.cat(xs, 1)
+        return self.final(x).squeeze()
 
 class TextCnnWithFusion(nn.Module):
 
@@ -1013,41 +1028,41 @@ class Transformer(nn.Module):
         return xx
 
 
-class DynaConv(nn.Module):
-    class Block(nn.Module):
-
-        def __init__(self, k):
-            super().__init__()
-            self.dc1 = fairseq.modules.DynamicConv1dTBC(EMBEDDING_DIM, kernel_size=k, padding_l=k // 2, num_heads=10,
-                                                        weight_softmax=True)
-            self.l1 = nn.Linear(EMBEDDING_DIM, 2 * EMBEDDING_DIM)
-            self.l2 = nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM)
-            self.ff = nn.Sequential(
-                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM),
-                nn.ReLU(),
-                nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM)
-            )
-            self.norm = nn.LayerNorm((EMBEDDING_DIM))
-
-        def forward(self, x):
-            x = self.norm(x + self.dc1(F.glu(self.l1(x))))
-            x = self.norm(x + self.ff(x))
-            return x
-
-    def __init__(self):
-        super().__init__()
-        self.emb = get_emb()
-        self.b1 = self.Block(30)
-        self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
-
-    def forward(self, x, _, __):
-        xx = self.emb(x)
-        xx = xx.transpose(0, 1).contiguous()
-        xx = self.b1(xx)
-        xx = xx.sum(0)
-        xx = xx / x_len.unsqueeze(1).float()
-        xx = self.final(xx)
-        return xx
+# class DynaConv(nn.Module):
+#     class Block(nn.Module):
+#
+#         def __init__(self, k):
+#             super().__init__()
+#             self.dc1 = fairseq.modules.DynamicConv1dTBC(EMBEDDING_DIM, kernel_size=k, padding_l=k // 2, num_heads=10,
+#                                                         weight_softmax=True)
+#             self.l1 = nn.Linear(EMBEDDING_DIM, 2 * EMBEDDING_DIM)
+#             self.l2 = nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM)
+#             self.ff = nn.Sequential(
+#                 nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM),
+#                 nn.ReLU(),
+#                 nn.Linear(EMBEDDING_DIM, EMBEDDING_DIM)
+#             )
+#             self.norm = nn.LayerNorm((EMBEDDING_DIM))
+#
+#         def forward(self, x):
+#             x = self.norm(x + self.dc1(F.glu(self.l1(x))))
+#             x = self.norm(x + self.ff(x))
+#             return x
+#
+#     def __init__(self):
+#         super().__init__()
+#         self.emb = get_emb()
+#         self.b1 = self.Block(30)
+#         self.final = get_final(EMBEDDING_DIM, EMBEDDING_DIM // 2)
+#
+#     def forward(self, x, _, __):
+#         xx = self.emb(x)
+#         xx = xx.transpose(0, 1).contiguous()
+#         xx = self.b1(xx)
+#         xx = xx.sum(0)
+#         xx = xx / x_len.unsqueeze(1).float()
+#         xx = self.final(xx)
+#         return xx
 
 
 # %%
@@ -1067,7 +1082,7 @@ class DynaConv(nn.Module):
 # model = CNN()
 # model = TextCnnWithFusionAndContext()
 # model = leam2()
-model = leam()
+# model = leam()
 # model = DiSAN()
 # model = SwemAvg(); N_EPOCHS = N_EPOCHS * 2
 # model = SwemMax(); N_EPOCHS = N_EPOCHS * 2
@@ -1075,7 +1090,7 @@ model = leam()
 # N_EPOCHS = N_EPOCHS * 2
 # model = SwemHier()
 # model = TextCNN()
-# model = TextCNN1d()
+model = TextCNN1d()
 # model = TextCnnWithFusion()
 # model = RNN(nn.GRU, bidirectional=True, num_layers=1, bias=True); N_EPOCHS = N_EPOCHS * 2
 # model = GhettoRNN(nn.LSTM, bidirectional=False, num_layers=1); N_EPOCHS = N_EPOCHS * 2
@@ -1088,6 +1103,7 @@ model = leam()
 # model = DeepConv(EMBEDDING_DIM, 5, EMBEDDING_DIM * 2)
 # model = DynaConv()
 # model = Transformer()
+# model = PytorchTransformer()
 
 # N_EPOCHS = 25
 
