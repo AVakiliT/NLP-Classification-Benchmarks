@@ -50,18 +50,20 @@ print('Reading Dataset...')
 # NUM_CLASSES = 50
 #
 # DATASET = 'yelp_full'
-# MAX_LEN = 200
+# MAX_LEN = 50
 # N_EPOCHS = 6
 # NUM_CLASSES = 5
+# MIN_FREQ = 50
 
 DATASET = 'ng20'
 MAX_LEN = 200
-N_EPOCHS = 15
+N_EPOCHS = 12
 NUM_CLASSES = 20
+MIN_FREQ = 4
+
 
 BATCH_SIZE = 32
 LR = 1e-3
-MIN_FREQ = 4
 EMBEDDING_DIM = 100
 EPSILON = 1e-13
 INF = 1e13
@@ -97,8 +99,8 @@ def read_train(fname):
         if f < MIN_FREQ:
             unk_count += f
             texts_counter.pop(w)
-    words_set = set(texts_counter.keys())
-    itos = ['<UNK>', '<PAD>', '<SOS>', '<EOS>'] + list(words_set)
+    words_set = [k for k, _ in texts_counter.most_common()]
+    itos = ['<UNK>', '<PAD>', '<SOS>', '<EOS>'] + words_set
     stoi = {v: i for i, v in enumerate(itos)}
     texts_idx = df.text.apply(lambda x: ([stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
     texts_idx_sos = df.text.apply(lambda x: ([SOS] + [stoi[i] if i in stoi else UNK for i in x.split()][:MAX_LEN]))
@@ -156,9 +158,10 @@ def collate(batch):
 
 
 train_data_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, collate_fn=collate)
-test_data_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, collate_fn=collate)
+test_data_loader = DataLoader(test_dataset, batch_size=32, shuffle=True, collate_fn=collate)
 
 VOCAB_LEN = len(itos)
+print(VOCAB_LEN)
 # %%
 
 
@@ -265,13 +268,13 @@ def get_emb():
 
 
 # %%
-train_list = list(train_data_loader)
-all_train_text = torch.cat([x[0] for x in train_list], 0)
-del train_list
-
-
-def random_train_sample(n):
-    return all_train_text[np.random.randint(0, len(all_train_text), n)]
+# train_list = list(train_data_loader)
+# all_train_text = torch.cat([x[0] for x in train_list], 0)
+# del train_list
+#
+#
+# def random_train_sample(n):
+#     return all_train_text[np.random.randint(0, len(all_train_text), n)]
 
 
 # %%
@@ -281,6 +284,170 @@ def sentence_emb_avg(xx, mask):
     len_s = (mask ^ 1).long().sum(1, keepdim=True).float()
     y_s = xx.sum(1) / len_s
     return y_s
+
+
+class LSTM_LM_VAE_Concat(nn.Module):
+    def __init__(self, hidden_size, latent_size, dropword=0.):
+        super().__init__()
+        self.dropword = dropword
+        self.latent_size = latent_size
+        self.emb = get_emb()
+        self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
+                                   bidirectional=True, batch_first=True, num_layers=1)
+        self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM + self.latent_size , hidden_size=hidden_size * 2,
+                                   batch_first=True, num_layers=1)
+
+        self.output2vocab = nn.Linear(hidden_size * 2, VOCAB_LEN)
+
+    def encode(self, xx1):
+        states, _ = self.encoder_rnn(xx1)
+        return states
+
+    def decode(self, xx2):
+        xx, _ = self.decoder_rnn(xx2)
+        logits = self.output2vocab(xx)  # BSV
+        return logits
+
+    def get_latent(self, states):
+        raise NotImplementedError
+
+    def forward(self, encoder_input, decoder_input):
+        xx1 = self.emb(encoder_input)
+        states = self.encode(xx1)
+        z, kld = self.get_latent(states)
+
+        if self.dropword > 0:
+            decoder_input = decoder_input.masked_fill(torch.rand(x_sos.shape).to(device).lt(self.dropword).masked_fill(x_sos == PAD, False), UNK)
+
+        xx2 = self.emb(decoder_input)
+        xx2 = torch.cat([xx2, z.unsqueeze(1).repeat(1, decoder_input.shape[1], 1)], -1)
+
+        logits = self.decode(xx2)
+
+        return logits, None, kld
+
+    def standard_sample(self):
+        raise NotImplementedError
+
+    def sample(self, z=None, seq_len=MAX_LEN):
+        with torch.no_grad():
+            if z is None:
+                z = self.standard_sample().to(device).unsqueeze(0)
+            else:
+                z = torch.Tensor(z).to(device).unsqueeze(0)
+
+            decoder_input = torch.LongTensor([SOS]).unsqueeze(0)
+
+            sentence = ''
+
+            for i in range(seq_len):
+                xx2 = self.emb(decoder_input.to(device))
+                xx2 = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+                logits = self.decode(xx2)
+                logits = logits[0, -1].softmax(0)
+                next_word_id = np.random.choice(range(VOCAB_LEN), p=logits.detach().cpu().numpy())
+
+                if next_word_id == EOS:
+                    break
+
+                sentence += ' ' + itos[next_word_id]
+
+                decoder_input = torch.cat([decoder_input, torch.LongTensor([next_word_id]).unsqueeze(0)], 1)
+
+            return sentence.strip()
+
+
+class LSTM_LM_vMF(LSTM_LM_VAE_Concat):
+
+    def __init__(self, hidden_size, latent_size, kappa, dropword=0):
+        super().__init__(hidden_size, latent_size, dropword=dropword)
+        self.context2mu = nn.Linear(2 * hidden_size, latent_size)
+        self.kappa = kappa
+
+    def get_latent(self, states):
+        mu = self.context2mu(states[:, -1, :])  # BZ
+        mu = mu / mu.norm(dim=-1, keepdim=True)
+
+        q_z = VonMisesFisher(mu, torch.ones(mu.shape[0], 1).mul(self.kappa).to(device))
+        p_z = HypersphericalUniform(mu.shape[1] - 1, device=device)
+
+        z = q_z.rsample()
+
+        kld = torch.distributions.kl.kl_divergence(q_z, p_z).sum(-1).sum()
+
+        return z, kld
+
+    def standard_sample(self):
+        return HypersphericalUniform(self.latent_size - 1).sample()
+
+class LSTM_LM_G(LSTM_LM_VAE_Concat):
+
+    def __init__(self, hidden_size, latent_size, dropword=False):
+        super().__init__(hidden_size, latent_size, dropword=dropword)
+        self.context2mu = nn.Linear(2 * hidden_size, latent_size)
+        self.context2var = nn.Linear(2 * hidden_size, latent_size)
+
+    def get_latent(self, states):
+        mu = self.context2mu(states[:, -1, :])  # BZ
+        logvar = self.context2var(states[:, -1, :])  # BZ
+
+        # q_z = torch.distributions.normal.Normal(mu, logvar)
+        # p_z = torch.distributions.normal.Normal(torch.zeros_like(mu), torch.ones_like(logvar))
+        #
+        # z = q_z.rsample()
+        #
+        # kld = torch.distributions.kl.kl_divergence(q_z, p_z).sum(-1).sum()
+
+
+        std = logvar.mul(.5).exp()
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        # kld = (logvar - mu.pow(2) - logvar.exp() + 1).sum(-1).mul(-0.5).sum()
+        kld = -0.5 * torch.sum(logvar - mu.pow(2) - logvar.exp() + 1, -1)
+        kld = kld.sum()
+
+        return z, kld
+
+    def standard_sample(self):
+        return torch.distributions.normal.Normal(torch.zeros(self.latent_size), torch.ones(self.latent_size)).sample()
+
+
+class LSTM_LM_(LSTM_LM_VAE_Concat):
+
+    def __init__(self, hidden_size, latent_size, dropword=False):
+        super().__init__(hidden_size, latent_size, dropword=dropword)
+        self.context2latent = nn.Linear(2 * hidden_size, latent_size)
+
+
+    def get_latent(self, states):
+        z = self.context2latent(states[:, -1, :])  # BZ
+        kld = torch.zeros(1).to(device)
+        return z, kld
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # class LSTM_LM(nn.Module):
@@ -317,6 +484,9 @@ def sentence_emb_avg(xx, mask):
 #         logits = self.decode(xx2, z)
 #
 #         return logits, kld
+
+
+
 
 
 class LSTM_LM_Bowman(nn.Module):
@@ -362,6 +532,7 @@ class LSTM_LM_Bowman_Dist(nn.Module):
         self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size * 2,
                                    batch_first=True, num_layers=1)
 
+        self.latent2hidden = nn.Linear(latent_size, hidden_size * 2)
         self.output2vocab = nn.Linear(hidden_size * 2, VOCAB_LEN)
         self.context2mu = nn.Linear(hidden_size * 2, latent_size)
         self.context2logvar = nn.Linear(hidden_size * 2, latent_size)
@@ -369,7 +540,7 @@ class LSTM_LM_Bowman_Dist(nn.Module):
     def encode(self, xx1):
         states, _ = self.encoder_rnn(xx1)
         mu = self.context2mu(states[:, -1, :])  # BZ
-        logvar = F.softplus(self.context2mu(states[:, -1, :]))  # BZ
+        logvar = F.softplus(self.context2logvar(states[:, -1, :]))  # BZ
 
         q_z = torch.distributions.normal.Normal(mu, logvar)
         p_z = torch.distributions.normal.Normal(torch.zeros_like(mu), torch.ones_like(logvar))
@@ -393,7 +564,8 @@ class LSTM_LM_Bowman_Dist(nn.Module):
         kld, z = self.encode(xx1)
 
         xx2 = self.emb(decoder_input)
-        logits = self.decode(xx2, (z.unsqueeze(0), torch.zeros_like(z.unsqueeze(0))))
+        hidden = self.latent2hidden(z).unsqueeze(0)
+        logits = self.decode(xx2, (hidden, torch.zeros_like(hidden)))
 
         return logits, None, kld
 
@@ -401,6 +573,7 @@ class LSTM_LM_Bowman_VMF_Dist(nn.Module):
     def __init__(self, hidden_size, latent_size, kappa):
         super().__init__()
         self.kappa = kappa
+        self.latent_size = latent_size
         self.emb = get_emb()
         self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
                                    bidirectional=True, batch_first=True, num_layers=1)
@@ -408,9 +581,24 @@ class LSTM_LM_Bowman_VMF_Dist(nn.Module):
                                    batch_first=True, num_layers=1)
 
         self.output2vocab = nn.Linear(hidden_size * 2, VOCAB_LEN)
-        self.context2mu = nn.Linear(hidden_size * 2, latent_size)
+        # self.context2mu = nn.Linear(hidden_size * 2, latent_size)
         # self.context2logvar = nn.Linear(hidden_size * 2, latent_size)
         self.latent2hidden = nn.Linear(latent_size, hidden_size * 2)
+
+        # self.output2vocab = nn.Sequential(
+        #     nn.Linear(hidden_size * 2, hidden_size * 4),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_size * 4, VOCAB_LEN))
+        self.context2mu = nn.Sequential(
+            nn.Linear(hidden_size * 2, (latent_size + hidden_size * 2) // 2),
+            nn.ReLU(),
+            nn.Linear((latent_size + hidden_size * 2) // 2, latent_size))
+        # self.latent2hidden = nn.Sequential(
+        #     nn.Linear(latent_size, (latent_size + hidden_size * 2)//2),
+        #     nn.ReLU(),
+        #     nn.Linear((latent_size + hidden_size * 2) // 2, hidden_size * 2)
+        # )
+
 
     def encode(self, xx1):
         states, _ = self.encoder_rnn(xx1)
@@ -441,6 +629,70 @@ class LSTM_LM_Bowman_VMF_Dist(nn.Module):
         xx2 = self.emb(decoder_input)
         hidden = self.latent2hidden(z).unsqueeze(0)
         logits = self.decode(xx2, (hidden, torch.zeros_like(hidden)))
+
+        return logits, None, kld
+
+class LSTM_LM_VMF(nn.Module):
+    def __init__(self, hidden_size, latent_size, kappa):
+        super().__init__()
+        self.kappa = kappa
+        self.latent_size = latent_size
+        self.emb = get_emb()
+        self.encoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM, hidden_size=hidden_size,
+                                   bidirectional=True, batch_first=True, num_layers=1)
+        self.decoder_rnn = nn.LSTM(input_size=EMBEDDING_DIM + latent_size, hidden_size=hidden_size * 2,
+                                   batch_first=True, num_layers=1)
+
+        self.output2vocab = nn.Linear(hidden_size * 2, VOCAB_LEN)
+        # self.context2mu = nn.Linear(hidden_size * 2, latent_size)
+        # self.context2logvar = nn.Linear(hidden_size * 2, latent_size)
+        # self.latent2hidden = nn.Linear(latent_size, hidden_size * 2)
+
+        # self.output2vocab = nn.Sequential(
+        #     nn.Linear(hidden_size * 2, hidden_size * 4),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_size * 4, VOCAB_LEN))
+        self.context2mu = nn.Sequential(
+            nn.Linear(hidden_size * 2, (latent_size + hidden_size * 2) // 2),
+            nn.ReLU(),
+            nn.Linear((latent_size + hidden_size * 2) // 2, latent_size))
+        # self.latent2hidden = nn.Sequential(
+        #     nn.Linear(latent_size, (latent_size + hidden_size * 2)//2),
+        #     nn.ReLU(),
+        #     nn.Linear((latent_size + hidden_size * 2) // 2, hidden_size * 2)
+        # )
+
+
+    def encode(self, xx1):
+        states, _ = self.encoder_rnn(xx1)
+        mu = self.context2mu(states[:, -1, :])  # BZ
+        mu = mu / mu.norm(dim=-1, keepdim=True)
+
+        q_z = VonMisesFisher(mu, torch.ones(mu.shape[0], 1).mul(self.kappa).to(device))
+        p_z = HypersphericalUniform(mu.shape[1] - 1, device=device)
+
+        z = q_z.rsample()
+
+        kl = torch.distributions.kl.kl_divergence(q_z, p_z).sum(-1).sum()
+
+        return kl, z
+
+    def decode(self, xx2):
+        # xx = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+
+        xx, _ = self.decoder_rnn(xx2)
+        xx = self.output2vocab(xx)  # BSV
+
+        return xx
+
+    def forward(self, encoder_input, decoder_input):
+        xx1 = self.emb(encoder_input)
+        kld, z = self.encode(xx1)
+
+        xx2 = self.emb(decoder_input)
+        # hidden = self.latent2hidden(z).unsqueeze(0)
+        xx2 = torch.cat([xx2, z.unsqueeze(1).repeat(1, xx2.shape[1], 1)], -1)
+        logits = self.decode(xx2)
 
         return logits, None, kld
 
@@ -492,7 +744,7 @@ class LSTM_VAE(nn.Module):
         xx2 = self.emb(decoder_input)
         logits = self.decode(xx2, z)
 
-        return logits, kld
+        return logits, None, kld
 
     def sample(self, zz=None, seq_len=MAX_LEN):
         with torch.no_grad():
@@ -864,7 +1116,9 @@ class Hybrid(nn.Module):
 
 def perplexity(logits, target):
     with torch.no_grad():
-        ppl = logits.log_softmax(-1).gather(2, target.unsqueeze(2)).neg().mean(1).exp().clamp(-INF, +INF).squeeze(-1)
+        # ppl = logits.log_softmax(-1).gather(2, target.unsqueeze(2)).neg().mean(1).exp().clamp(-INF, +INF).squeeze(-1)
+        ppl = (logits.log_softmax(-1).gather(2, target.unsqueeze(2)).neg().squeeze(-1).masked_fill(target == PAD, 0).sum(-1) / target.eq(PAD).long().sum(
+            -1).sub(MAX_LEN).neg().float()).exp().clamp(-INF, INF)
         return ppl
 
 
@@ -872,15 +1126,26 @@ def perplexity(logits, target):
 
 # model = LSTM_VAE_CNN_AE(latent_size=32, hidden_size=128)
 # model = LSTM_LM(latent_size=32, hidden_size=128)
-# model = LSTM_VAE(latent_size=32, hidden_size=128)
+# model = LSTM_VAE(latent_size=64, hidden_size=128)
 # model = ConvDeconv()
 # model = LSTM_LM_Bowman(hidden_size=128)
 # model = Hybrid(latent_size=64, rnn_dim=256)
-# model = LSTM_LM_Bowman_Dist(hidden_size=128, latent_size=256)
-model = LSTM_LM_Bowman_VMF_Dist(hidden_size=128, latent_size=256, kappa=100)
+# model = LSTM_LM_Bowman_Dist(hidden_size=128, latent_size=64)
+# model = LSTM_LM_Bowman_VMF_Dist(hidden_size=128, latent_size=64, kappa=80)
+# model = LSTM_LM_VMF(hidden_size=128, latent_size=64, kappa=80)
+
+model = LSTM_LM_vMF(128, 64, 80)
+# model = LSTM_LM_G(128, 64)
+# model = LSTM_LM_(128, 64)
+
+
+# model = LSTM_LM_vMF(128, 64, 80, dropword=.1)
+# model = LSTM_LM_G(128, 64, dropword=1)
+# model = LSTM_LM_(128, 64, dropword=1)
 
 
 model = model.to(device)
+print(model.__class__.__name__)
 
 c_loss = nn.CrossEntropyLoss(reduction='sum')
 
@@ -911,7 +1176,7 @@ for i_epoch in range(1, N_EPOCHS):
 
         logits, aux_logits, kld = model(x, x_sos)
 
-        cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), target.view(-1), reduction='sum')
+        cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), target.view(-1), reduction='sum', ignore_index=PAD)
 
         if aux_logits is not None:
             aux_cross_entropy = F.cross_entropy(aux_logits.view(-1, VOCAB_LEN), x_sos.view(-1), reduction='sum')
@@ -920,12 +1185,14 @@ for i_epoch in range(1, N_EPOCHS):
 
         loss = cross_entropy + \
                aux_cross_entropy * 0.2 + \
-               0.1 * kld * min(max(0, ((5 / 1) * (i_epoch - 1 + (total / len(train_dataset))) - 4)),1)
+               kld * min(1, ((i_epoch - 1) / 10 + (total / len(train_dataset)) / 10))
+               # kld * torch.sigmoid(torch.FloatTensor([((i_epoch - 1) / 10 + total / len(train_dataset))])).item()
+               # 0.1 * kld * min(max(0, ((5 / 5) * (i_epoch - 1 + (total / len(train_dataset))) - 4)),1)
         #  INCREASE KLD FROM 0 TO 1 AFTER 80%
         # kld * (.01 + (.99 * ((total / len(train_dataset)) / 10 + (i_epoch / min(N_EPOCHS, 10)))))
 
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), 5)
+        nn.utils.clip_grad_norm_(model.parameters(), .5)
         optimizer.step()
 
         ppl = perplexity(logits, target).sum()
@@ -966,7 +1233,7 @@ for i_epoch in range(1, N_EPOCHS):
 
             logits, aux_logits, kld = model(x, x_sos)
 
-            cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), target.view(-1), reduction='sum')
+            cross_entropy = F.cross_entropy(logits.view(-1, VOCAB_LEN), target.view(-1), reduction='sum', ignore_index=PAD)
 
             ppl = perplexity(logits, target).sum()
 
